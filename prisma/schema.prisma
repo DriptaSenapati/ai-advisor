@@ -1,0 +1,130 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+model NormalizedTransactions {
+  id           String   @id @default(auto()) @map("_id") @db.ObjectId
+  date         DateTime
+  description  String
+  creditAmount Float
+  debitAmount  Float
+  balance      Float
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model ExceptionTransactions {
+  id           String    @id @default(auto()) @map("_id") @db.ObjectId
+  date         DateTime?
+  description  String?
+  creditAmount String?
+  debitAmount  String?
+  balance      String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// model MerchantMapping {
+//   id          String                 @id @default(auto()) @map("_id") @db.ObjectId
+//   category    String
+//   embedText   String
+//   embedding   Float[]
+//   transaction FinalTransactionData[]
+//   createdAt   DateTime               @default(now())
+//   updatedAt   DateTime               @updatedAt
+// }
+
+model FinalTransactionData {
+  id                String   @id @default(auto()) @map("_id") @db.ObjectId
+  date              DateTime
+  description       String
+  creditAmount      Float
+  debitAmount       Float
+  balance           Float
+  clusterId         String?  @db.ObjectId
+  cluster           Cluster? @relation(fields: [clusterId], references: [id])
+  descriptionVector Float[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model Cluster {
+  id                       String                 @id @default(auto()) @map("_id") @db.ObjectId
+  transactions             FinalTransactionData[]
+  clusterLength            Int
+  merchantName             String?
+  category                 String?
+  confidence               Float?
+  categorySupportRationale String?
+  centroid                 String
+  createdAt                DateTime               @default(now())
+  updatedAt                DateTime               @updatedAt
+  recurringPatterns        RecurringPattern[]
+}
+
+model MonthlyStats {
+  id                String   @id @default(auto()) @map("_id") @db.ObjectId
+  month             String
+  totalIncome       Float
+  totalExpenses     Float
+  netSavings        Float
+  savingsRate       Float
+  closingBalance    Float
+  totalRefunds      Float
+  refundCount       Int
+  categoryBreakdown Json[]
+  topMerchants      Json[]
+  weekdayVsWeekend  Json
+  timeOfMonth       Json
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model RecurringPattern {
+  id                     String   @id @default(auto()) @map("_id") @db.ObjectId
+  clusterId              String   @db.ObjectId
+  cluster                Cluster  @relation(fields: [clusterId], references: [id])
+  merchantName           String?
+  category               String?
+  estimatedMonthlyAmount Float
+  frequency              String
+  monthsDetected         Int
+  isCancellable          Boolean
+  isActive               Boolean
+  lastTransactionDate    DateTime?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+}
+
+model InsightReport {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  generatedAt      DateTime @default(now())
+  monthsCovered    String[]
+  tier             Int
+  insights         Json
+  rawStatsSnapshot Json
+  createdAt        DateTime @default(now())
+}
+
+model Goal {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  goalType       String
+  targetAmount   Float
+  deadline       DateTime
+  categoryTarget String?
+  status         String   @default("active")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}

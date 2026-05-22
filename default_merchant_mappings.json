@@ -1,0 +1,473 @@
+{
+    "Food": {
+        "merchants": [
+            "swiggy",
+            "zomato",
+            "dominos",
+            "kfc",
+            "mcdonalds",
+            "barbequenation",
+            "mainlandchina",
+            "bbqnation",
+            "piratesofgrill",
+            "absolute barbecue",
+            "haldiram",
+            "bikaji",
+            "balaji wafers",
+            "lays",
+            "kurkure",
+            "starbucks",
+            "ccd",
+            "barista",
+            "chaayos",
+            "teabox"
+        ],
+        "patterns": [
+            "restaurant",
+            "cafe",
+            "dhaba",
+            "mess",
+            "tiffin",
+            "fine dine",
+            "buffet",
+            "snacks",
+            "namkeen",
+            "coffee",
+            "tea",
+            "juice"
+        ],
+        "keywords": [
+            "food",
+            "dining",
+            "meal",
+            "lunch",
+            "dinner",
+            "snacks",
+            "drink",
+            "beverage"
+        ]
+    },
+    "Groceries": {
+        "merchants": [
+            "blinkit",
+            "zepto",
+            "bigbasket",
+            "jiomart",
+            "instamart"
+        ],
+        "patterns": [
+            "supermarket",
+            "mart",
+            "store"
+        ],
+        "keywords": [
+            "grocery",
+            "vegetables",
+            "essentials"
+        ]
+    },
+    "Transport": {
+        "merchants": [
+            "uber",
+            "ola",
+            "rapido",
+            "blusmart",
+            "meru",
+            "indianoil",
+            "bharatpetroleum",
+            "hp",
+            "shell",
+            "essar",
+            "parkplus",
+            "mygate parking",
+            "secure parking",
+            "parking plaza",
+            "city parking",
+            "fastag",
+            "npci fastag",
+            "icici fastag",
+            "hdfc fastag",
+            "axis fastag"
+        ],
+        "patterns": [
+            "taxi",
+            "ride",
+            "petrol",
+            "diesel",
+            "parking",
+            "toll"
+        ],
+        "keywords": [
+            "transport",
+            "commute",
+            "fuel",
+            "vehicle parking",
+            "highway toll"
+        ]
+    },
+    "Travel": {
+        "merchants": [
+            "irctc",
+            "redbus",
+            "makemytrip",
+            "goibibo",
+            "yatra"
+        ],
+        "patterns": [
+            "ticket",
+            "booking"
+        ],
+        "keywords": [
+            "travel"
+        ]
+    },
+    "Shopping": {
+        "merchants": [
+            "amazon",
+            "flipkart",
+            "meesho",
+            "snapdeal",
+            "shopclues",
+            "myntra",
+            "ajio",
+            "zara",
+            "hm",
+            "pantaloons",
+            "croma",
+            "reliance digital",
+            "vijay sales",
+            "poorvika",
+            "sangeetha",
+            "titan",
+            "fastrack",
+            "caratlane",
+            "tanishq",
+            "pc jeweller"
+        ],
+        "patterns": [
+            "online store",
+            "clothing",
+            "electronics",
+            "accessories"
+        ],
+        "keywords": [
+            "shopping",
+            "fashion",
+            "gadgets",
+            "jewelry"
+        ]
+    },
+    "Housing": {
+        "merchants": [
+            "no broker",
+            "magicbricks",
+            "housing",
+            "99acres",
+            "nestaway",
+            "ikea",
+            "pepperfry",
+            "urban ladder",
+            "home centre",
+            "godrej interio"
+        ],
+        "patterns": [
+            "rent",
+            "furniture"
+        ],
+        "keywords": [
+            "housing",
+            "home furniture"
+        ]
+    },
+    "Utilities": {
+        "merchants": [
+            "tata power",
+            "bescom",
+            "mseb",
+            "bmc water",
+            "delhi jal board"
+        ],
+        "patterns": [
+            "electricity",
+            "water"
+        ],
+        "keywords": [
+            "utilities"
+        ]
+    },
+    "Bills": {
+        "merchants": [
+            "airtel",
+            "jio",
+            "bsnl",
+            "vodafone",
+            "act"
+        ],
+        "patterns": [
+            "bill payment",
+            "recharge"
+        ],
+        "keywords": [
+            "bills",
+            "mobile recharge"
+        ]
+    },
+    "Entertainment": {
+        "merchants": [
+            "netflix",
+            "spotify",
+            "prime",
+            "hotstar",
+            "youtube premium",
+            "steam",
+            "epic games",
+            "playstation",
+            "xbox",
+            "nintendo",
+            "bookmyshow",
+            "insider",
+            "paytm events",
+            "district",
+            "eventshigh"
+        ],
+        "patterns": [
+            "subscription",
+            "streaming",
+            "game",
+            "events"
+        ],
+        "keywords": [
+            "entertainment",
+            "movies",
+            "gaming",
+            "tickets"
+        ]
+    },
+    "Health": {
+        "merchants": [
+            "apollo",
+            "pharmeasy",
+            "1mg",
+            "netmeds",
+            "practo",
+            "apollo pharmacy",
+            "medplus",
+            "wellness forever",
+            "guardian pharmacy",
+            "lalpathlabs",
+            "dr lal pathlabs",
+            "thyrocare",
+            "metropolis",
+            "suburban diagnostics"
+        ],
+        "patterns": [
+            "pharmacy",
+            "medicine",
+            "test"
+        ],
+        "keywords": [
+            "health",
+            "diagnostics"
+        ]
+    },
+    "PersonalCare": {
+        "merchants": [
+            "nykaa",
+            "purplle",
+            "sephora",
+            "lakme",
+            "colorbar",
+            "vlcc",
+            "kaya",
+            "naturals",
+            "green trends",
+            "jawed habib",
+            "cultfit",
+            "gold gym",
+            "anytime fitness",
+            "fitternity",
+            "healthifyme"
+        ],
+        "patterns": [
+            "cosmetics",
+            "spa",
+            "gym"
+        ],
+        "keywords": [
+            "beauty",
+            "wellness",
+            "fitness"
+        ]
+    },
+    "Education": {
+        "merchants": [
+            "udemy",
+            "coursera",
+            "byjus",
+            "unacademy",
+            "upgrad"
+        ],
+        "patterns": [
+            "course"
+        ],
+        "keywords": [
+            "education"
+        ]
+    },
+    "Finance": {
+        "merchants": [
+            "sbi",
+            "hdfc",
+            "icici",
+            "axis",
+            "kotak",
+            "visa",
+            "mastercard",
+            "rupay",
+            "amex",
+            "diners",
+            "paytm",
+            "mobikwik",
+            "freecharge",
+            "amazon pay",
+            "ola money",
+            "cashkaro",
+            "nearbuy",
+            "magicpin",
+            "coupon duniya"
+        ],
+        "patterns": [
+            "saving",
+            "credit card",
+            "wallet",
+            "cashback"
+        ],
+        "keywords": [
+            "finance",
+            "deposit",
+            "credit",
+            "reward"
+        ]
+    },
+    "Transfer": {
+        "merchants": [
+            "gpay",
+            "phonepe",
+            "paytm",
+            "paypal",
+            "wise"
+        ],
+        "patterns": [
+            "upi"
+        ],
+        "keywords": [
+            "transfer"
+        ]
+    },
+    "Services": {
+        "merchants": [
+            "urbancompany",
+            "housejoy",
+            "bro4u",
+            "helper4u",
+            "serviz"
+        ],
+        "patterns": [
+            "repair",
+            "maintenance"
+        ],
+        "keywords": [
+            "services"
+        ]
+    },
+    "Insurance": {
+        "merchants": [
+            "lic",
+            "hdfc ergo",
+            "icici lombard",
+            "bajaj allianz",
+            "tata aig"
+        ],
+        "patterns": [
+            "insurance"
+        ],
+        "keywords": [
+            "policy"
+        ]
+    },
+    "Investment": {
+        "merchants": [
+            "zerodha",
+            "groww",
+            "upstox",
+            "paytm money",
+            "kuvera"
+        ],
+        "patterns": [
+            "stocks"
+        ],
+        "keywords": [
+            "investment"
+        ]
+    },
+    "Loan": {
+        "merchants": [
+            "bajaj finserv",
+            "moneyview",
+            "kreditbee",
+            "cashe",
+            "earlysalary"
+        ],
+        "patterns": [
+            "loan"
+        ],
+        "keywords": [
+            "emi"
+        ]
+    },
+    "Tax": {
+        "merchants": [
+            "incometax",
+            "cleartax",
+            "taxspanner",
+            "quicko",
+            "myitreturn"
+        ],
+        "patterns": [
+            "tax"
+        ],
+        "keywords": [
+            "income tax"
+        ]
+    },
+    "Donation": {
+        "merchants": [
+            "giveindia",
+            "ketto",
+            "milaap",
+            "impactguru",
+            "gofundme"
+        ],
+        "patterns": [
+            "donation"
+        ],
+        "keywords": [
+            "charity"
+        ]
+    },
+    "Other": {
+        "merchants": [
+            "atm",
+            "bank charge",
+            "processing fee",
+            "interest debit",
+            "misc expense"
+        ],
+        "patterns": [
+            "misc"
+        ],
+        "keywords": [
+            "other"
+        ]
+    }
+}

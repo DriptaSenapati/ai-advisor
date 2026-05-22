@@ -1,0 +1,35 @@
+node_modules
+
+# Environment variables — never commit
+.env
+.env.*
+
+# Build output
+build/
+
+# Auto-generated Prisma client (regenerated via prisma generate)
+src/generated/
+/generated/prisma
+
+# Platform-specific binaries
+*.node
+
+# Claude Code local settings
+.claude/
+CLAUDE.md
+
+# Generated / extracted data files
+*.FinalTransactionData.json
+error_data.json
+extracted_data.json
+extracted_maps.json
+keyMapping.json
+normalized_data.json
+normalizedTranKeyOutput.json
+test.json
+
+# SQLite dev checkpoints
+*.sqlite
+
+# PDF files
+*.pdf
