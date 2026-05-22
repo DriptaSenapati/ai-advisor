@@ -154,21 +154,13 @@ npm run test:vec  # test vector search
 
 ---
 
-## Insight Tiers
+## Roadmap
 
-Insights are progressively richer as more statement history is available:
+### Multi-Bank PDF Support
+The current PDF extractor is built around a single bank's statement format. The plan is to make extraction format-agnostic — detecting column layouts dynamically and supporting statements from multiple banks without hardcoded mappings.
 
-| Months of Data | Tier | Unlocks |
-|---|---|---|
-| 1 month | Tier 1 | Spending breakdown, cash flow, recurring expenses |
-| 2–5 months | Tier 2 | Month-over-month trends, impulse spend detection |
-| 6+ months | Tier 3 | Seasonal patterns, anomaly detection, category creep |
+### Goal Setting & Recommended Insights
+Users will be able to define financial goals (save a target amount, reduce spend in a category, build an emergency fund, pay off a loan) and receive personalized, data-driven recommendations based on their actual spending history and recurring patterns.
 
----
-
-## Goal Types
-
-- `save_amount` — save a target amount by a deadline
-- `reduce_category` — cut a category's monthly spend
-- `emergency_fund` — build N months of expenses as a buffer
-- `debt_payoff` — pay off a loan faster
+### REST API & Web App Backend
+A structured HTTP API layer to expose all pipeline capabilities — statement upload, transaction queries, insight retrieval, and goal management — enabling a web front-end to be built on top of the existing AI and data infrastructure.
