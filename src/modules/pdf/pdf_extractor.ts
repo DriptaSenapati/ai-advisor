@@ -1,46 +1,37 @@
 import mupdf, { Page, PDFPage } from "mupdf";
 import fs from "fs";
 
-const NUM_LINES_TO_CHECK_FOR_HEADER = 4;
+const NUM_LINES_TO_CHECK_FOR_HEADER = 5;
 
 const extractJSONText = (pdfPath: string) => {
     const doc = mupdf.Document.openDocument(pdfPath).asPDF();
-    if (doc) {
-        doc.authenticatePassword(process.env.PDF_PASSWORD || "");
-        const pageCount = doc.countPages();
-        const textContent: Record<string, Record<string, any>> = {};
+    if (!doc) throw new Error(`Failed to open PDF: ${pdfPath}`);
 
-        for (let i = 0; i < pageCount; i++) {
-            const page = doc.loadPage(i);
-            // console.log(page.getBounds());
-            const jsonText = JSON.parse(page.toStructuredText("preserve-spans").asJSON());
-            textContent[i + 1] = jsonText;
-
-            // for (const block of text["blocks"]) {
-            //     const annotation = (page as PDFPage).createAnnotation("Polygon");
-            //     const x1 = block["bbox"]["x"];
-            //     const y1 = block["bbox"]["y"];
-            //     const x2 = block["bbox"]["x"] + block["bbox"]["w"];
-            //     const y2 = block["bbox"]["y"] + block["bbox"]["h"];
-            //     annotation.setColor([0, 0, 1])
-            //     annotation.setInteriorColor([])
-            //     annotation.addVertex([x1, y1])
-            //     annotation.addVertex([x2, y1])
-            //     annotation.addVertex([x2, y2])
-            //     annotation.addVertex([x1, y2])
-            //     annotation.update()
-            // }
-        }
-        // fs.writeFileSync("output-polygon.pdf", doc.saveToBuffer("incremental").asUint8Array())
-        return textContent;
+    if (doc.needsPassword()) {
+        const authenticated = doc.authenticatePassword(process.env.PDF_PASSWORD || "");
+        if (!authenticated) throw new Error(`Incorrect or missing password for PDF: ${pdfPath}`);
     }
 
+    const pageCount = doc.countPages();
+    const textContent: Record<string, Record<string, any>> = {};
+
+    for (let i = 0; i < pageCount; i++) {
+        const page = doc.loadPage(i);
+        const jsonText = JSON.parse(page.toStructuredText("preserve-spans").asJSON());
+        if ((jsonText["blocks"] as any[]).length > 0) {
+            textContent[i + 1] = jsonText;
+        }
+    }
+
+    return textContent;
 };
+
+const Y_TOLERANCE = 2;
 
 const _isSameY = (lines: Record<string, any>[]) => {
     if (lines.length === 0) return false;
     const yCoordinate = lines[0]?.["y"];
-    return lines.every((obj) => obj["y"] === yCoordinate);
+    return lines.every((obj) => Math.abs(obj["y"] - yCoordinate) <= Y_TOLERANCE);
 }
 
 
@@ -52,7 +43,7 @@ const identifyTableHeader = (textContent: Record<string, Record<string, any>>): 
         let headerFound = false;
         for (const block of blocks) {
             // console.log(block.lines, block.lines.length, _isSameY(block.lines), (block.lines as Record<string, any>[]).some(line => line["text"].toLowerCase().includes("date")));
-            if (block.lines.length >= NUM_LINES_TO_CHECK_FOR_HEADER && _isSameY(block.lines) && (block.lines as Record<string, any>[]).some(line => line["text"].toLowerCase().includes("date"))) {
+            if (block.lines.length >= NUM_LINES_TO_CHECK_FOR_HEADER && _isSameY(block.lines) && (block.lines as Record<string, any>[]).some(line => /\bdate\b/i.test(line["text"]))) {
                 headerDetails[pageNum] = {
                     y: block.bbox.y,
                     columns: block.lines.map((line: Record<string, any>) => ({ text: line["text"], x: line["x"], y: line["y"] }))
@@ -66,6 +57,9 @@ const identifyTableHeader = (textContent: Record<string, Record<string, any>>): 
         }
     }
     const nonNullHeaderDetails: { [pageNum: string]: { y: number, columns: { text: string, x: number, y: number }[] } } = Object.fromEntries(Object.entries(headerDetails).filter(([_, details]) => details !== null) as Array<[string, { y: number, columns: { text: string, x: number, y: number }[] }]>)
+    if (Object.keys(nonNullHeaderDetails).length === 0) {
+        throw new Error("No transaction table header found in the PDF. The statement format may not be supported.");
+    }
     return nonNullHeaderDetails;
 }
 
@@ -85,27 +79,29 @@ const _isDate = (text: string) => {
 }
 
 const _singlePageRowGrouper = (lines: Record<string, any>[]) => {
-    const rows: Record<string, any>[][] = []
-
+    const rows: Record<string, any>[][] = [];
     let currentRow: Record<string, any>[] = [];
+    let currentRowStartY: number | null = null;
+
     for (const line of lines) {
-        if (_isDate(line.text)) {
+        const isNewRowDate = _isDate(line.text) &&
+            (currentRowStartY === null || Math.abs(line.y - currentRowStartY) >= Y_TOLERANCE);
+
+        if (isNewRowDate) {
             if (currentRow.length > 0) {
                 rows.push([...currentRow]);
-                currentRow = [line];
-            } else {
-                currentRow.push(line);
             }
+            currentRow = [line];
+            currentRowStartY = line.y;
         } else {
             currentRow.push(line);
         }
     }
     if (currentRow.length > 0) {
         rows.push([...currentRow]);
-
     }
 
-    return rows;
+    return rows.filter(row => row.length > 0 && _isDate(row[0]!.text));
 }
 
 
@@ -129,7 +125,7 @@ const _flattenLines = (filteredBlocks: {
     for (const [pageNum, blocks] of Object.entries(filteredBlocks)) {
         flattenLines[pageNum] = blocks.map((block: Record<string, any>) => block.lines).flat();
         flattenLines[pageNum] = flattenLines[pageNum].sort((a, b) => {
-            if (Math.abs(a.y - b.y) < 2) return a.x - b.x;
+            if (Math.abs(a.y - b.y) < Y_TOLERANCE) return a.x - b.x;
             return a.y - b.y;
         });
     }
@@ -137,26 +133,74 @@ const _flattenLines = (filteredBlocks: {
     return flattenLines;
 }
 
+const MIN_CONSECUTIVE_TRANSACTION_BLOCKS = 3;
+
 const _filterBlocksBelowHeader = (textContent: Record<string, Record<string, any>>, headerDetails: Record<string, Record<string, any>>): { [pageNum: string]: Record<string, any>[] } => {
-    const headerY: { [pageNum: string]: number } = Object.fromEntries(Object.entries(headerDetails).map(([pageNum, details]) => [pageNum, details.y]));
-    return Object.fromEntries(Object.entries(headerY).map(([pageNum, y]) => textContent[pageNum] != undefined ? [pageNum, textContent[pageNum]["blocks"].filter((block: Record<string, any>) => block.bbox.y > y)] : [pageNum, []]));
+    return Object.fromEntries(
+        Object.entries(textContent).map(([pageNum, pageContent]) => {
+            const header = headerDetails[pageNum];
+            if (header) {
+                return [pageNum, pageContent["blocks"].filter((block: Record<string, any>) => block.bbox.y > header.y)];
+            }
+
+            // No header — find the first run of MIN_CONSECUTIVE_TRANSACTION_BLOCKS consecutive
+            // blocks each having >= NUM_LINES_TO_CHECK_FOR_HEADER lines. That marks the start
+            // of the transaction table on this page.
+            const blocks: Record<string, any>[] = pageContent["blocks"];
+            let consecutive = 0;
+            let startIdx = -1;
+
+            for (let i = 0; i < blocks.length; i++) {
+                if (blocks[i]!.lines.length >= NUM_LINES_TO_CHECK_FOR_HEADER) {
+                    consecutive++;
+                    if (consecutive === MIN_CONSECUTIVE_TRANSACTION_BLOCKS) {
+                        startIdx = i - (MIN_CONSECUTIVE_TRANSACTION_BLOCKS - 1);
+                        break;
+                    }
+                } else {
+                    consecutive = 0;
+                }
+            }
+
+            // Fallback: consecutive run not found (too few blocks or non-transaction blocks
+            // interspersed) — start from the first block that has enough lines
+            if (startIdx === -1) {
+                startIdx = blocks.findIndex(b => b.lines.length >= NUM_LINES_TO_CHECK_FOR_HEADER);
+            }
+
+            return [pageNum, startIdx !== -1 ? blocks.slice(startIdx) : []];
+        })
+    );
 }
 
 const _groupColumnsPerPage = (rows: Record<string, any>[][], headerDetails: { text: string, x: number, y: number }[]) => {
+    const sortedHeaders = [...headerDetails].sort((a, b) => a.x - b.x);
+    const leftmostHeader = sortedHeaders[0]!;
+    const secondHeader = sortedHeaders[1];
+
     let groupedColumns: { [header: string]: string[] }[] = [];
 
     for (const row of rows) {
         let column: { [header: string]: string[] } = Object.fromEntries(headerDetails.map(header => [header.text, []]));
         for (const line of row) {
-            let closestHeader = headerDetails[0];
-            const eligibleHeaders = headerDetails.filter(header => header.x < (line.x + line.bbox.w));
-            for (const header of eligibleHeaders) {
-                if (Math.abs(line.x - header.x) <= Math.abs(line.x - closestHeader!.x)) {
+            const eligibleHeaders = sortedHeaders.filter(header => header.x < (line.x + line.bbox.w));
+            const searchHeaders = eligibleHeaders.length > 0 ? eligibleHeaders : sortedHeaders;
+            let closestHeader = searchHeaders[0]!;
+            for (const header of searchHeaders) {
+                if (Math.abs(line.x - header.x) < Math.abs(line.x - closestHeader.x)) {
                     closestHeader = header;
                 }
-
             }
-            column[closestHeader!.text] = [...(column[closestHeader!.text] || []), line.text];
+
+            // The leftmost column (Date) holds exactly one value — the date that opened this row.
+            // Any subsequent line assigned to it is narration content whose X happens to be
+            // closer to the Date header than to the Narration header (common in HDFC format).
+            // Redirect those lines to the next column to the right.
+            if (closestHeader.text === leftmostHeader.text && column[leftmostHeader.text]!.length > 0 && secondHeader) {
+                closestHeader = secondHeader;
+            }
+
+            column[closestHeader.text] = [...(column[closestHeader.text] || []), line.text];
         }
         groupedColumns.push(column);
     }
@@ -167,10 +211,24 @@ const _groupColumns = (rows: {
     [pageNum: string]: Record<string, any>[][];
 }, headerDetails: Record<string, any>) => {
     let groupColumns: { [pageNum: string]: { [header: string]: string }[] } = {};
-    for (const [pageNum, pageRows] of Object.entries(rows)) {
-        const header = headerDetails[pageNum];
-        const colPerPage = _groupColumnsPerPage(pageRows, header.columns);
-        groupColumns[pageNum] = colPerPage;
+    let lastKnownHeader: { columns: { text: string, x: number, y: number }[] } | null = null;
+
+    const sortedPageNums = Object.keys(rows).sort((a, b) => parseInt(a) - parseInt(b));
+
+    for (const pageNum of sortedPageNums) {
+        const pageRows = rows[pageNum]!;
+        const header = headerDetails[pageNum] ?? lastKnownHeader;
+
+        if (!header) {
+            console.warn(`[PDF Extractor] No header available for page ${pageNum} — skipping`);
+            continue;
+        }
+
+        if (headerDetails[pageNum]) {
+            lastKnownHeader = headerDetails[pageNum];
+        }
+
+        groupColumns[pageNum] = _groupColumnsPerPage(pageRows, header.columns);
     }
     return groupColumns;
 }

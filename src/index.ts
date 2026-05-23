@@ -37,7 +37,7 @@ const advisorAgent = insightsAgentGraph.compile();
 
 
 transactionCategoryAgent.invoke({
-    statementPath: "assets\\2025_statement.pdf",
+    statementPath: "assets\\hdfc.pdf",
     messages: [],
     // llmFeedbackLoop: {
     //     maxLLMRetryAttempt: 3

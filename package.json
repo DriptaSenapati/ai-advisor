@@ -7,6 +7,7 @@
     "dev": "cross-env NODE_ENV=development nodemon --exec tsx src/index.ts",
     "dev:checkpoint": "cross-env NODE_ENV=development tsx src/scripts/checkpoint-runner.ts",
     "reset:db": "cross-env NODE_ENV=development tsx src/scripts/reset-db.ts",
+    "extract:pdf": "cross-env NODE_ENV=development tsx src/scripts/pdf-extractor-runner.ts",
     "build": "tsc",
     "start": "cross-env NODE_ENV=production node build/index.js",
     "test": "echo \"Error: no test specified\" && exit 1",
