@@ -3,10 +3,17 @@ import z from "zod";
 import { genericTransactionDataSchema, parseTransactionDate } from "../../../helpers/index.js";
 import { embeddingsModel } from "../../../models/index.js";
 import prisma from "../../../prismaClient.js";
-import { FinalTransactionData } from "../../../generated/prisma/client.js";
-import fs from "fs";
 
-//claude --resume a2676b7e-4be6-4c4e-a844-36e5dbe42c16
+function seededRandom(seed: number) {
+    return function () {
+        seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+        let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+}
+
+const rand = seededRandom(42);
 
 const createEmbeddings = async (text: string[]): Promise<number[][]> => {
     const embedding = await embeddingsModel.embedDocuments(text);
@@ -36,7 +43,7 @@ const performDescriptionClustering = async (transactions: {
 
 
     while (descriptionPool.length > 0) {
-        const randomSeed = Math.floor(Math.random() * descriptionPool.length) + 1;
+        const randomSeed = Math.floor(rand() * descriptionPool.length) + 1;
         const seedTransaction = descriptionPool[randomSeed - 1];
         if (!seedTransaction) throw new Error("Seed transaction not found in the description pool.");
         const emb = seedTransaction.descriptionVector;
@@ -143,10 +150,9 @@ const clusterGeneratorTool = tool(async (input) => {
 
 
     const descriptions = transactionData.map(transaction => descriptionCleaner(transaction.description));
+    console.log(`[Cluster Tool] Generating embeddings for ${descriptions.length} descriptions...`);
     const descriptionEmbeddings = await createEmbeddings(descriptions);
-
-
-    // console.log("Merchant Categories Search Result:", merchantCategories[0]);
+    console.log(`[Cluster Tool] Embeddings ready — saving to FinalTransactionData`);
 
     const categorizedTransactions = transactionData.map((transaction, index) => ({
         ...transaction,
@@ -166,6 +172,7 @@ const clusterGeneratorTool = tool(async (input) => {
     })
 
     const transIds = await prisma.finalTransactionData.findMany({ select: { id: true, description: true, descriptionVector: true } });
+    console.log(`[Cluster Tool] Saved ${categorizedTransactions.length} transactions — fetched ${transIds.length} total from DB for clustering`);
 
     await performDescriptionClustering(transIds).catch(console.error);
 

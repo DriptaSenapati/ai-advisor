@@ -2,9 +2,7 @@
 
 // import { buildTransactionData } from "./modules/pdf/pdf_extractor.js";
 import "./envConfig.js";
-import { advisorAgentGraph } from "./graph.js";
-
-const advisorAgent = advisorAgentGraph.compile();
+import { advisorAgentGraph, insightsAgentGraph } from "./graph.js";
 import fs from "fs";
 import { read_seed_mapping } from "./seeds/merchant_mapping_seeding.js";
 import createVectorSearchIndex from "./seeds/create_vector_search_index.js";
@@ -34,36 +32,31 @@ import createVectorSearchIndex from "./seeds/create_vector_search_index.js";
 
 // // read_seed_mapping("./default_merchant_mappings.json")
 
+const transactionCategoryAgent = advisorAgentGraph.compile();
+const advisorAgent = insightsAgentGraph.compile();
 
-// advisorAgent.invoke({
-//     statementPath: "assets\\2025_statement.pdf",
-//     messages: [],
-//     // llmFeedbackLoop: {
-//     //     maxLLMRetryAttempt: 3
-//     // }
-// }).then((response) => {
-//     console.log("Ran Statement Correction Agent successfully.");
 
-//     // const jsonData = JSON.stringify(response.exceptions, null, 4);
+transactionCategoryAgent.invoke({
+    statementPath: "assets\\2025_statement.pdf",
+    messages: [],
+    // llmFeedbackLoop: {
+    //     maxLLMRetryAttempt: 3
+    // }
+}).then(() => {
+    console.log("Ran Statement Correction Agent successfully.");
+    console.log("Starting Insights Agent...");
 
-//     // fs.writeFile("./extracted_data.json", jsonData, 'utf8', (err) => {
-//     //     if (err) {
-//     //         console.error('Error writing to file', err);
-//     //     } else {
-//     //         console.log(`Data written to ./extracted_data.json as JSON.`);
-//     //     }
-//     // });
+    setTimeout(() => {
+        advisorAgent.invoke({
+            isFirstRun: true,
+        }).then(() => {
+            console.log("Insights Agent ran successfully");
+        }).catch((error) => {
+            console.error("Error invoking the insights agent:", error);
+        });
+    }, 1000);
 
-//     // const jsonDataError = JSON.stringify(response.errorData, null, 4);
 
-//     // fs.writeFile("./error_data.json", jsonDataError, 'utf8', (err) => {
-//     //     if (err) {
-//     //         console.error('Error writing to file', err);
-//     //     } else {
-//     //         console.log(`Data written to ./error_data.json as JSON.`);
-//     //     }
-//     // });
-
-// }).catch((error) => {
-//     console.error("Error invoking the agent:", error);
-// });
+}).catch((error) => {
+    console.error("Error invoking the agent:", error);
+});

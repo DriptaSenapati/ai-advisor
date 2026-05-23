@@ -233,6 +233,10 @@ const llmSystemMessageKeyMapper = ChatPromptTemplate.fromTemplate(`
 
             also, avoid to use special characters in the value mapping and keep it simple and clean. Avoid using multiple words in the key mapping and try to keep it as short as possible while keeping the meaning intact.
             Don't use '#' as a value in the mapping. If you don't know the mapping for any key then map it to "unknown" value.
+
+    Rule:
+        1. What DATA will be given in the input those strings should be same as output JSON values. 
+            If input is "Deposit (Cr.)" then output "creditAmount: "Deposit (Cr.)". See, output JSON value is same as input string.
     
     DATA:
     {extractedData}

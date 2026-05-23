@@ -28,16 +28,18 @@ async function resetAdvisor(s: AdvisorStage) {
         case "all":
         case "normalize":
             await prisma.finalTransactionData.deleteMany();
+            await prisma.recurringPattern.deleteMany();
             await prisma.cluster.deleteMany();
             await prisma.normalizedTransactions.deleteMany();
             await prisma.exceptionTransactions.deleteMany();
-            console.log("Cleared: FinalTransactionData, Cluster, NormalizedTransactions, ExceptionTransactions");
+            console.log("Cleared: FinalTransactionData, RecurringPattern, Cluster, NormalizedTransactions, ExceptionTransactions");
             break;
 
         case "categorize":
             await prisma.finalTransactionData.deleteMany();
+            await prisma.recurringPattern.deleteMany();
             await prisma.cluster.deleteMany();
-            console.log("Cleared: FinalTransactionData, Cluster");
+            console.log("Cleared: FinalTransactionData, RecurringPattern, Cluster");
             break;
 
         case "llm":
