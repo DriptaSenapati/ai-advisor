@@ -10,15 +10,21 @@
 import "../envConfig.js";
 import fs from "fs";
 import path from "path";
-import { buildTransactionData } from "../modules/pdf/pdf_extractor.js";
+import { buildTransactionData, debugPDF } from "../modules/pdf/pdf_extractor.js";
 
 const pdfArg = process.argv.find(a => a.startsWith("--pdf="))?.split("=")[1];
 const outArg = process.argv.find(a => a.startsWith("--out="))?.split("=")[1];
+const isDebug = process.argv.includes("--debug");
 
 const PDF_PATH = pdfArg ?? "assets\\2025_statement.pdf";
 const OUT_PATH = outArg ?? "extracted_data.json";
 
 console.log(`[PDF Runner] Reading: ${PDF_PATH}`);
+
+if (isDebug) {
+    debugPDF(PDF_PATH);
+    process.exit(0);
+}
 
 const result = buildTransactionData(PDF_PATH);
 

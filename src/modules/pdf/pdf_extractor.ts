@@ -28,34 +28,72 @@ const extractJSONText = (pdfPath: string) => {
 
 const Y_TOLERANCE = 2;
 
-const _isSameY = (lines: Record<string, any>[]) => {
-    if (lines.length === 0) return false;
-    const yCoordinate = lines[0]?.["y"];
-    return lines.every((obj) => Math.abs(obj["y"] - yCoordinate) <= Y_TOLERANCE);
-}
-
-
 const identifyTableHeader = (textContent: Record<string, Record<string, any>>): { [pageNum: string]: { y: number, columns: { text: string, x: number, y: number }[] } } => {
     const headerDetails: Record<string, Record<string, any> | null> = {}
 
     for (const [pageNum, pageContent] of Object.entries(textContent)) {
         const blocks = pageContent["blocks"];
         let headerFound = false;
+
         for (const block of blocks) {
-            // console.log(block.lines, block.lines.length, _isSameY(block.lines), (block.lines as Record<string, any>[]).some(line => line["text"].toLowerCase().includes("date")));
-            if (block.lines.length >= NUM_LINES_TO_CHECK_FOR_HEADER && _isSameY(block.lines) && (block.lines as Record<string, any>[]).some(line => /\bdate\b/i.test(line["text"]))) {
-                headerDetails[pageNum] = {
-                    y: block.bbox.y,
-                    columns: block.lines.map((line: Record<string, any>) => ({ text: line["text"], x: line["x"], y: line["y"] }))
-                };
-                headerFound = true;
-                break;
+            const lines: Record<string, any>[] = block.lines;
+
+            // Group lines by Y coordinate within tolerance
+            const yGroups = new Map<number, Record<string, any>[]>();
+            for (const line of lines) {
+                const y: number = line["y"];
+                let matched = false;
+                for (const key of yGroups.keys()) {
+                    if (Math.abs(key - y) <= Y_TOLERANCE) {
+                        yGroups.get(key)!.push(line);
+                        matched = true;
+                        break;
+                    }
+                }
+                if (!matched) yGroups.set(y, [line]);
             }
+
+            // Anchor Y = the Y group with the most lines
+            const [anchorY, anchorLines] = [...yGroups.entries()].reduce((a, b) => a[1].length >= b[1].length ? a : b);
+
+            if (anchorLines.length < NUM_LINES_TO_CHECK_FOR_HEADER) continue;
+            if (!anchorLines.some((l: Record<string, any>) => /\bdate\b/i.test(l["text"]))) continue;
+
+            // Accept up to 3 continuation Y levels after the anchor
+            const sortedYs = [...yGroups.keys()].sort((a, b) => a - b);
+            const anchorIdx = sortedYs.findIndex(y => Math.abs(y - anchorY) <= Y_TOLERANCE);
+            const continuationYKeys = new Set(sortedYs.slice(anchorIdx + 1, anchorIdx + 4));
+
+            // Build columns from anchor lines
+            const columns: { text: string, x: number, y: number }[] = anchorLines.map((l: Record<string, any>) => ({
+                text: l["text"].trim(),
+                x: l["x"],
+                y: l["y"]
+            }));
+
+            // Merge continuation lines into the closest-X anchor column
+            for (const contY of continuationYKeys) {
+                for (const line of (yGroups.get(contY) ?? [])) {
+                    let closestCol = columns[0]!;
+                    for (const col of columns) {
+                        if (Math.abs(line["x"] - col.x) < Math.abs(line["x"] - closestCol.x)) {
+                            closestCol = col;
+                        }
+                    }
+                    closestCol.text = (closestCol.text + " " + (line["text"] as string).trim()).trim();
+                }
+            }
+
+            headerDetails[pageNum] = { y: block.bbox.y, columns };
+            headerFound = true;
+            break;
         }
+
         if (!headerFound) {
             headerDetails[pageNum] = null;
         }
     }
+
     const nonNullHeaderDetails: { [pageNum: string]: { y: number, columns: { text: string, x: number, y: number }[] } } = Object.fromEntries(Object.entries(headerDetails).filter(([_, details]) => details !== null) as Array<[string, { y: number, columns: { text: string, x: number, y: number }[] }]>)
     if (Object.keys(nonNullHeaderDetails).length === 0) {
         throw new Error("No transaction table header found in the PDF. The statement format may not be supported.");
@@ -183,7 +221,7 @@ const _groupColumnsPerPage = (rows: Record<string, any>[][], headerDetails: { te
     for (const row of rows) {
         let column: { [header: string]: string[] } = Object.fromEntries(headerDetails.map(header => [header.text, []]));
         for (const line of row) {
-            const eligibleHeaders = sortedHeaders.filter(header => header.x < (line.x + line.bbox.w));
+            const eligibleHeaders = sortedHeaders.filter(header => header.x < (line.x + line.bbox.w + 30));
             const searchHeaders = eligibleHeaders.length > 0 ? eligibleHeaders : sortedHeaders;
             let closestHeader = searchHeaders[0]!;
             for (const header of searchHeaders) {
@@ -267,4 +305,25 @@ const buildTransactionData = (pdfPath: string) => {
     return groupedColumns;
 }
 
-export { buildTransactionData };
+const debugPDF = (pdfPath: string) => {
+    const textContent = extractJSONText(pdfPath);
+    console.log(`[Debug] Total pages with content: ${Object.keys(textContent).length}`);
+
+    for (const [pageNum, pageContent] of Object.entries(textContent)) {
+        const blocks: Record<string, any>[] = pageContent["blocks"];
+        console.log(`\n=== Page ${pageNum} — ${blocks.length} block(s) ===`);
+
+        for (let bi = 0; bi < blocks.length; bi++) {
+            const block = blocks[bi]!;
+            const lines: Record<string, any>[] = block.lines;
+            const ys = lines.map((l: any) => l.y.toFixed(1));
+            const sameY = lines.length > 0 && lines.every((l: any) => Math.abs(l.y - lines[0]!.y) <= Y_TOLERANCE);
+            console.log(`  Block ${bi}: ${lines.length} line(s) | sameY=${sameY} | bbox.y=${block.bbox?.y?.toFixed(1)}`);
+            for (const line of lines) {
+                console.log(`    y=${line.y.toFixed(1)} x=${line.x.toFixed(1)} | "${line.text}"`);
+            }
+        }
+    }
+};
+
+export { buildTransactionData, debugPDF };

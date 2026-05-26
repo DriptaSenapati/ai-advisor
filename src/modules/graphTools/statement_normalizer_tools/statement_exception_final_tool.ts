@@ -4,7 +4,7 @@ import prisma from "../../../prismaClient.js";
 import { parseTransactionDate } from "../../../helpers/index.js";
 
 const parseAmount = (amountStr: string): boolean => {
-    const amountRegex = /(?<!\w)(?:₹|Rs\.?|INR|\$|€|£)?\s?-?\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})?(?!\w)/;
+    const amountRegex = /(?<!\w)(?:₹|Rs\.?|INR|\$|€|£)?\s?-?(?:\d{1,3}(?:,\d{2,3})*|\d+)(?:\.\d{1,2})?(?:Cr|Dr)?(?!\w)/i;
     return amountRegex.test(amountStr)
 };
 
