@@ -11,6 +11,8 @@ import { statsAggregatorToolNode } from "./modules/nodes/ai_insights_nodes/stats
 import { tranRecurringToolNode } from "./modules/nodes/ai_insights_nodes/tran_recurring_tool_node.js";
 import { insightsNode } from "./modules/nodes/ai_insights_nodes/insights_node.js";
 
+// TS2742: LangGraph's inferred StateGraph type references internal dist paths.
+// Cast to any here so consumers (.compile(), checkpoint-runner) retain full runtime behaviour.
 const advisorAgentGraph = new StateGraph(agentGraphSchema)
     .addNode("pdfExtractorNode", pdfExtractorToolNode)
     .addNode("statementNormalizerSubgraph", statementNormalizerSubgraph)
@@ -18,8 +20,7 @@ const advisorAgentGraph = new StateGraph(agentGraphSchema)
     .addEdge(START, "pdfExtractorNode")
     .addEdge("pdfExtractorNode", "statementNormalizerSubgraph")
     .addEdge("statementNormalizerSubgraph", "transactionCategorySubgraph")
-    .addEdge("transactionCategorySubgraph", END);
-
+    .addEdge("transactionCategorySubgraph", END) as any;
 
 const insightsAgentGraph = new StateGraph(insightsAgentGraphSchema)
     .addNode("statsAggregatorToolNode", statsAggregatorToolNode)
@@ -28,7 +29,7 @@ const insightsAgentGraph = new StateGraph(insightsAgentGraphSchema)
     .addEdge(START, "statsAggregatorToolNode")
     .addEdge("statsAggregatorToolNode", "recurringPatternToolNode")
     .addEdge("recurringPatternToolNode", "insightsNode")
-    .addEdge("insightsNode", END);
+    .addEdge("insightsNode", END) as any;
 
 export { advisorAgentGraph, insightsAgentGraph };
 

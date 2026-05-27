@@ -7,7 +7,10 @@ import { statementExceptionFinalTool } from "../../graphTools/statement_normaliz
 const statementExceptionFinalToolNode: GraphNode<typeof agentGraphSchema> = async (state) => {
     const total = (state.transactionData || []).length;
     console.log(`[Exception Handler] Validating and saving ${total} transactions to DB`);
-    const exceptions = await statementExceptionFinalTool.invoke({ correctedData: state.transactionData || [] });
+    const exceptions = await statementExceptionFinalTool.invoke({
+        correctedData: state.transactionData || [],
+        statementMetadataId: state.statementMetadataId,
+    });
     const validCount = total - exceptions.length;
     console.log(`[Exception Handler] Done — ${validCount} valid → NormalizedTransactions, ${exceptions.length} invalid → ExceptionTransactions`);
     return {

@@ -2,14 +2,41 @@ import { GraphNode } from "@langchain/langgraph";
 import { agentGraphSchema } from "../../graph_state.js";
 import { pdfExtractorTool } from "../graphTools/statementExtraction/graph_pdf_extractor.js";
 import { v4 as uuidv4 } from 'uuid';
+import crypto from "crypto";
+import fs from "fs";
+import prisma from "../../prismaClient.js";
 
 const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) => {
     console.log(`[PDF Extractor] Parsing statement: ${state.statementPath}`);
+
+    const pdfBytes = fs.readFileSync(state.statementPath);
+    const contentHash = crypto.createHash("sha256").update(pdfBytes).digest("hex");
+
+    const existing = await prisma.statementMetadata.findUnique({ where: { contentHash } });
+    if (existing) {
+        console.warn(`[PDF Extractor] Duplicate upload detected — contentHash already exists (id: ${existing.id}). Aborting.`);
+        throw new Error(`Duplicate statement upload: this PDF has already been processed (StatementMetadata id: ${existing.id}).`);
+    }
+
+    const metadata = await prisma.statementMetadata.create({
+        data: {
+            bankName: state.bankName,
+            contentHash,
+            normalizerStatus: "Processing",
+            insightsStatus: "Processing",
+        }
+    });
+    console.log(`[PDF Extractor] StatementMetadata created (id: ${metadata.id})`);
+
     const extractedData = await pdfExtractorTool.invoke({ pdfPath: state.statementPath });
     const rows = extractedData ? Object.values(extractedData).flat() : [];
     console.log(`[PDF Extractor] Done — extracted ${rows.length} rows across ${extractedData ? Object.keys(extractedData).length : 0} page(s)`);
 
-    return { ...state, extractedData: extractedData && rows.map((tran) => ({ ...tran, [process.env.TEMP_ID_KEY as string]: uuidv4() })) };
+    return {
+        ...state,
+        statementMetadataId: metadata.id,
+        extractedData: extractedData && rows.map((tran) => ({ ...tran, [process.env.TEMP_ID_KEY as string]: uuidv4() })),
+    };
 
     // return {
     //     ...state,

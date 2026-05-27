@@ -52,7 +52,7 @@ const performDescriptionClustering = async (transactions: {
         let merchantCategoriesSearchResult: { description: string; similarity: number; _id: { '$oid': string } }[] = [];
 
         const poolIds = descriptionPool.map(d => ({ '$oid': d.id }));
-        const numCandidates = Math.max(150, descriptionPool.length * 10);
+        const numCandidates = Math.min(10000, Math.max(150, descriptionPool.length * 10));
 
         while (true) {
             merchantCategoriesSearchResult = await prisma.finalTransactionData.aggregateRaw({
@@ -143,7 +143,7 @@ const performDescriptionClustering = async (transactions: {
 
 
 const clusterGeneratorTool = tool(async (input) => {
-    const { transactionData } = input;
+    const { transactionData, statementMetadataId } = input;
     if (!transactionData || transactionData.length === 0) {
         throw new Error("transactionData is required.");
     }
@@ -161,13 +161,14 @@ const clusterGeneratorTool = tool(async (input) => {
 
     // push to mongoDB
     await prisma.finalTransactionData.createMany({
-        data: categorizedTransactions.map((transaction, idx) => ({
+        data: categorizedTransactions.map((transaction) => ({
             date: parseTransactionDate(transaction.date) || new Date(0),
             creditAmount: parseFloat((transaction.creditAmount || "0").replace(/,/g, "")),
             debitAmount: parseFloat((transaction.debitAmount || "0").replace(/,/g, "")),
             balance: parseFloat((transaction.balance || "0").replace(/,/g, "")),
             description: descriptionCleaner(transaction.description || ""),
-            descriptionVector: transaction.descriptionVector
+            descriptionVector: transaction.descriptionVector,
+            statementMetadataId: statementMetadataId ?? null,
         })),
     })
 
@@ -189,9 +190,8 @@ const clusterGeneratorTool = tool(async (input) => {
         The output of this tool will be used as input for the final statement generation tool.
         Also created description clustering vector and stored in the database for future use.`,
         schema: z.object({
-            transactionData: z.array(
-                genericTransactionDataSchema
-            )
+            transactionData: z.array(genericTransactionDataSchema),
+            statementMetadataId: z.string().optional().describe("ID of the StatementMetadata record for this upload"),
         })
 
     }

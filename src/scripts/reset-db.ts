@@ -32,7 +32,8 @@ async function resetAdvisor(s: AdvisorStage) {
             await prisma.cluster.deleteMany();
             await prisma.normalizedTransactions.deleteMany();
             await prisma.exceptionTransactions.deleteMany();
-            console.log("Cleared: FinalTransactionData, RecurringPattern, Cluster, NormalizedTransactions, ExceptionTransactions");
+            await prisma.errorPdfExtract.deleteMany();
+            console.log("Cleared: FinalTransactionData, RecurringPattern, Cluster, NormalizedTransactions, ExceptionTransactions, ErrorPdfExtract");
             break;
 
         case "categorize":

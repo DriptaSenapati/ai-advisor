@@ -15,25 +15,29 @@ datasource db {
 }
 
 model NormalizedTransactions {
-  id           String   @id @default(auto()) @map("_id") @db.ObjectId
-  date         DateTime
-  description  String
-  creditAmount Float
-  debitAmount  Float
-  balance      Float
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id                  String             @id @default(auto()) @map("_id") @db.ObjectId
+  date                DateTime
+  description         String
+  creditAmount        Float
+  debitAmount         Float
+  balance             Float
+  statementMetadataId String?            @db.ObjectId
+  statementMetadata   StatementMetadata? @relation("NormalizedTransactionsMetadata", fields: [statementMetadataId], references: [id])
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
 }
 
 model ExceptionTransactions {
-  id           String    @id @default(auto()) @map("_id") @db.ObjectId
-  date         DateTime?
-  description  String?
-  creditAmount String?
-  debitAmount  String?
-  balance      String?
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id                  String             @id @default(auto()) @map("_id") @db.ObjectId
+  date                DateTime?
+  description         String?
+  creditAmount        String?
+  debitAmount         String?
+  balance             String?
+  statementMetadataId String?            @db.ObjectId
+  statementMetadata   StatementMetadata? @relation("ExceptionTransactionsMetadata", fields: [statementMetadataId], references: [id])
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
 }
 
 // model MerchantMapping {
@@ -47,17 +51,19 @@ model ExceptionTransactions {
 // }
 
 model FinalTransactionData {
-  id                String   @id @default(auto()) @map("_id") @db.ObjectId
-  date              DateTime
-  description       String
-  creditAmount      Float
-  debitAmount       Float
-  balance           Float
-  clusterId         String?  @db.ObjectId
-  cluster           Cluster? @relation(fields: [clusterId], references: [id])
-  descriptionVector Float[]
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  id                  String             @id @default(auto()) @map("_id") @db.ObjectId
+  date                DateTime
+  description         String
+  creditAmount        Float
+  debitAmount         Float
+  balance             Float
+  clusterId           String?            @db.ObjectId
+  cluster             Cluster?           @relation(fields: [clusterId], references: [id])
+  descriptionVector   Float[]
+  statementMetadataId String?            @db.ObjectId
+  statementMetadata   StatementMetadata? @relation(fields: [statementMetadataId], references: [id])
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
 }
 
 model Cluster {
@@ -93,9 +99,9 @@ model MonthlyStats {
 }
 
 model RecurringPattern {
-  id                     String   @id @default(auto()) @map("_id") @db.ObjectId
-  clusterId              String   @db.ObjectId
-  cluster                Cluster  @relation(fields: [clusterId], references: [id])
+  id                     String    @id @default(auto()) @map("_id") @db.ObjectId
+  clusterId              String    @db.ObjectId
+  cluster                Cluster   @relation(fields: [clusterId], references: [id])
   merchantName           String?
   category               String?
   estimatedMonthlyAmount Float
@@ -104,8 +110,8 @@ model RecurringPattern {
   isCancellable          Boolean
   isActive               Boolean
   lastTransactionDate    DateTime?
-  createdAt              DateTime @default(now())
-  updatedAt              DateTime @updatedAt
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
 }
 
 model InsightReport {
@@ -127,4 +133,34 @@ model Goal {
   status         String   @default("active")
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+}
+
+model ErrorPdfExtract {
+  id                  String             @id @default(auto()) @map("_id") @db.ObjectId
+  action              String
+  rationale           String
+  row                 Json
+  statementMetadataId String?            @db.ObjectId
+  statementMetadata   StatementMetadata? @relation("ErrorPdfExtractMetadata", fields: [statementMetadataId], references: [id])
+  createdAt           DateTime           @default(now())
+}
+
+model StatementMetadata {
+  id                     String                   @id @default(auto()) @map("_id") @db.ObjectId
+  bankName               String
+  statementPeriodStart   DateTime?
+  statementPeriodEnd     DateTime?
+  contentHash            String                   @unique
+  totalTransactions      Int?
+  exceptionCount         Int?
+  normalizerStatus       String                   @default("Processing") // "Processing" | "Completed" | "Error"
+  insightsStatus         String                   @default("Processing") // "Processing" | "Completed" | "Error"
+  normalizerError        String?
+  insightsError          String?
+  transactions           FinalTransactionData[]
+  normalizedTransactions NormalizedTransactions[] @relation("NormalizedTransactionsMetadata")
+  exceptionTransactions  ExceptionTransactions[]  @relation("ExceptionTransactionsMetadata")
+  errorPdfExtracts       ErrorPdfExtract[]        @relation("ErrorPdfExtractMetadata")
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @updatedAt
 }

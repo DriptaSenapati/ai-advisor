@@ -168,6 +168,13 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
         },
     });
 
+    if (state.statementMetadataId) {
+        await prisma.statementMetadata.update({
+            where: { id: state.statementMetadataId },
+            data: { insightsStatus: "Completed" },
+        });
+    }
+
     console.log(`InsightReport saved for tier ${tier}, months: ${monthsCovered.join(", ")}`);
 
     return {

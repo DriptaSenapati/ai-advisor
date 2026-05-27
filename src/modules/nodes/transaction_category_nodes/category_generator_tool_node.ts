@@ -6,7 +6,10 @@ import z from "zod";
 
 const clusterGeneratorToolNode: GraphNode<typeof agentGraphSchema> = async (state) => {
     console.log(`[Cluster Generator] Embedding ${(state.transactionData || []).length} transaction descriptions and building clusters`);
-    const categorizedTransactions = await clusterGeneratorTool.invoke({ transactionData: state.transactionData as z.infer<typeof genericTransactionDataSchema>[] || [] })
+    const categorizedTransactions = await clusterGeneratorTool.invoke({
+        transactionData: state.transactionData as z.infer<typeof genericTransactionDataSchema>[] || [],
+        statementMetadataId: state.statementMetadataId,
+    })
     console.log(`[Cluster Generator] Done — ${categorizedTransactions.length} transactions embedded and clustered`);
     return { ...state, finalTransactionData: categorizedTransactions }
 }
