@@ -146,69 +146,69 @@ const insightsGenLlm = normalizerLLM.withStructuredOutput(insightsGenllmSchema);
 // e.g., Date: date, Description: description, Credit Amount: creditAmount, Debit Amount: debitAmount, Balance: balance
 
 const llmSystemMessage = ChatPromptTemplate.fromTemplate(`
-    You are a deterministic bank transaction error detector.
+    You are a deterministic bank transaction error detector and corrector.
 
     Input:
     JSON array where each object represents one transaction row extracted from a bank statement table.
-    The JSON may be slightly unstructured.
+    Fields: date, description, creditAmount, debitAmount, balance, tempId.
 
     Goal:
-    Identify ONLY rows that contain errors or require correction.
+    Identify and fix rows that contain errors. Return ONLY rows that need removal or correction.
+    Do NOT include rows that are already correct.
 
-    Important:
-    Do NOT modify rows that are already correct.
-    Return ONLY rows that need removal or correction.
+    ── DETECTION RULES ──────────────────────────────────────────────────────────
 
-    Rules for detecting errors:
+    1. Merged column values (most common extraction error)
+    A field contains two space-separated numbers, e.g. balance = "234.00 23,445.00".
+    This means two adjacent PDF columns were merged into one field during extraction.
 
-    1. Amount validation
-    • creditAmount and debitAmount cannot both contain valid values
-    • creditAmount and debitAmount cannot both be null when the row represents a transaction
-    • amount fields must contain numeric values only
+    The actual column order for this data is:
+        {columnOrder}
 
-    2. Balance validation
-    • balance must be numeric
-    • do NOT change balance value
+    Rule: the FIRST space-separated value in a merged field belongs to the column
+    immediately BEFORE it in the above sequence. The SECOND value stays in the
+    current field.
 
-    3. Description validation
-    Remove row if description:
-    • is empty
-    • contains keywords like:
-        - balance forward
-        - opening balance
-        - closing balance
-        - total
-        - summary
-        - page
-        - statement generated
+    Use ACTION_INCORRECT and return the corrected row with values split accordingly.
+    Do not use description keywords to decide direction — column order is the only signal.
 
+    2. Amount validation
+    • creditAmount and debitAmount cannot both have values in the same row
+    • at least one of creditAmount or debitAmount must have a value for a transaction row
+    • amount fields must contain a single numeric value (digits, commas, decimal point only)
+    • a Cr or Dr suffix on an amount is valid — strip it, do not flag as error
 
-    4. Structural validation
-    Remove row if:
-    • row represents opening balance or closing balance
-    • row is not a transaction
-    • row contains obvious extraction noise
+    3. Balance validation
+    • balance must be a single numeric value after stripping Cr/Dr suffix
+    • if balance contains two space-separated numbers, apply merged column fix (rule 1)
 
-    5. Correction rules
-    If row has small correctable issues:
-    • fix formatting issues
-    • fix date format if obvious
-    • remove unwanted characters in description
-    • keep original numeric values unchanged
+    4. Description validation
+    Use ACTION_REMOVE if description:
+    • is empty or whitespace only
+    • is exactly one of: "balance forward", "opening balance", "closing balance",
+      "total", "summary", "statement generated"
+    • is a page header or footer repeated from the PDF
 
-    6. Keep temporarary ID unchanged.
+    5. Structural validation
+    Use ACTION_REMOVE if:
+    • row is an opening or closing balance summary line, not an actual transaction
+    • row contains only metadata (page number, bank name, account number)
 
-    Return corrected row instead of marking as error whenever possible.
+    6. Correction rules for ACTION_INCORRECT
+    • split merged column values (rule 1)
+    • strip Cr/Dr suffix from amount or balance fields if present
+    • fix date format if clearly wrong but recoverable
+    • clean description: remove leading/trailing whitespace, collapse internal spaces
+    • do not alter a value that is already correct
 
+    ── OUTPUT RULES ──────────────────────────────────────────────────────────────
 
-    Rules:
-    • index = position of row in input array (starting from 0)
-    • correctedRow required only when action = ACTION_INCORRECT
-    • do not include rows that are already valid
-    • do not remove any key-value pairs from correctedRow
-    • do not modify numeric values
-    • output must be valid JSON
-    • do not include explanation outside JSON
+    • Keep tempId unchanged in every corrected row
+    • Do not remove any keys from a corrected row — include all fields
+    • Prefer ACTION_INCORRECT (fix) over ACTION_REMOVE (delete) whenever fixable
+    • Do not flag rows with short but valid descriptions like "GST", "SMS CHARGES",
+      "INTEREST CREDIT" — these are legitimate bank transactions
+    • Output must be valid JSON with no explanation outside the JSON
 
     DATA:
     {extractedData}
