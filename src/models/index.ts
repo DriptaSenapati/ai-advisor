@@ -179,7 +179,8 @@ const llmSystemMessage = ChatPromptTemplate.fromTemplate(`
     • a Cr or Dr suffix on an amount is valid — strip it, do not flag as error
 
     3. Balance validation
-    • balance must be a single numeric value after stripping Cr/Dr suffix
+    • balance must be a single numeric value after stripping Cr/Dr suffix.
+    • balance must not contain any non-numeric text except for an optional Cr/Dr suffix.
     • if balance contains two space-separated numbers, apply merged column fix (rule 1)
 
     4. Description validation
@@ -197,12 +198,14 @@ const llmSystemMessage = ChatPromptTemplate.fromTemplate(`
     6. Correction rules for ACTION_INCORRECT
     • split merged column values (rule 1)
     • strip Cr/Dr suffix from amount or balance fields if present
+    • if balance contains trailing non-numeric text (e.g. a page footer like "Page 1 of 22"),
+      strip everything after the first valid numeric token and keep only that token
     • fix date format if clearly wrong but recoverable
     • clean description: remove leading/trailing whitespace, collapse internal spaces
     • do not alter a value that is already correct
 
     ── OUTPUT RULES ──────────────────────────────────────────────────────────────
-
+    • Identify incorrect rows and return only corrected rows as per you.
     • Keep tempId unchanged in every corrected row
     • Do not remove any keys from a corrected row — include all fields
     • Prefer ACTION_INCORRECT (fix) over ACTION_REMOVE (delete) whenever fixable

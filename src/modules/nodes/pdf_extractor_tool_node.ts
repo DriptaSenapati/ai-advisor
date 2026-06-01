@@ -14,13 +14,13 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
 
     const existing = await prisma.statementMetadata.findUnique({ where: { contentHash } });
     if (existing) {
-        console.warn(`[PDF Extractor] Duplicate upload detected — contentHash already exists (id: ${existing.id}). Aborting.`);
+        console.warn(`[PDF Extractor] Duplicate upload detected — same content already exists (id: ${existing.id}). Aborting.`);
         throw new Error(`Duplicate statement upload: this PDF has already been processed (StatementMetadata id: ${existing.id}).`);
     }
 
     const metadata = await prisma.statementMetadata.create({
         data: {
-            bankName: state.bankName,
+            bankName: state.bankName || "Unknown Bank",
             contentHash,
             normalizerStatus: "Processing",
             insightsStatus: "Processing",
@@ -32,11 +32,12 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
     const rows = extractedData ? Object.values(extractedData).flat() : [];
     console.log(`[PDF Extractor] Done — extracted ${rows.length} rows across ${extractedData ? Object.keys(extractedData).length : 0} page(s)`);
 
-    return {
-        ...state,
-        statementMetadataId: metadata.id,
-        extractedData: extractedData && rows.map((tran) => ({ ...tran, [process.env.TEMP_ID_KEY as string]: uuidv4() })),
-    };
+    const rowsWithTempId = rows.map((tran) => ({ ...tran, [process.env.TEMP_ID_KEY as string]: uuidv4() }));
+    await prisma.statementExtractedData.create({
+        data: { statementMetadataId: metadata.id, rows: rowsWithTempId },
+    });
+
+    return { statementMetadataId: metadata.id };
 
     // return {
     //     ...state,

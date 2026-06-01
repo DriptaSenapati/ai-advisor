@@ -5,6 +5,7 @@
  * ── Advisor graph (default) ─────────────────────────────────────────────────
  *   npm run dev:checkpoint                            # full run from PDF
  *   npm run dev:checkpoint -- --from=normalize        # re-run from normalization onwards
+ *   npm run dev:checkpoint -- --from=balance          # re-run from balance gap + confidence onwards
  *   npm run dev:checkpoint -- --from=categorize       # re-run from clustering + LLM onwards
  *   npm run dev:checkpoint -- --from=llm              # re-run only LLM categorization
  *
@@ -20,7 +21,7 @@
 import "../envConfig.js";
 
 const CHECKPOINT_DB = "./dev-checkpoints.sqlite";
-const PDF_PATH = "assets\\runu_senapati.pdf";
+const PDF_PATH = "assets\\2025_statement.pdf";
 
 // ── shared arg parsing ────────────────────────────────────────────────────────
 
@@ -33,10 +34,11 @@ const ADVISOR_THREAD_ID = "dev_run";
 
 const ADVISOR_RESUME_NODE: Record<string, string> = {
     normalize: "statementNormalizerSubgraph",
+    balance: "balanceAnalyzerSubgraph",
     categorize: "transactionCategorySubgraph",
 };
 
-const ADVISOR_VALID_STAGES = ["pdf", "normalize", "categorize", "llm"] as const;
+const ADVISOR_VALID_STAGES = ["pdf", "normalize", "balance", "categorize", "llm"] as const;
 type AdvisorStage = typeof ADVISOR_VALID_STAGES[number];
 
 async function runAdvisor() {
@@ -85,7 +87,7 @@ async function runAdvisor() {
 
     console.log(`[${fromStage}] Resuming advisor from checkpoint before "${targetNode}"...`);
     await agent.invoke(
-        { statementPath: PDF_PATH, messages: [] },
+        { statementPath: PDF_PATH, messages: [], bankName: "Kotak" },
         { configurable: { thread_id: ADVISOR_THREAD_ID, checkpoint_id: resumeCheckpointId } }
     );
 }

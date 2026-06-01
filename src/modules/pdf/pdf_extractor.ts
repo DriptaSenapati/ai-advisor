@@ -28,7 +28,7 @@ const extractJSONText = (pdfPath: string) => {
 
 const Y_TOLERANCE = 2;
 
-const identifyTableHeader = (textContent: Record<string, Record<string, any>>): { [pageNum: string]: { y: number, columns: { text: string, x: number, y: number }[] } } => {
+const identifyTableHeader = (textContent: Record<string, Record<string, any>>): { [pageNum: string]: { y: number, columns: { text: string, x: number, y: number, endX: number }[] } } => {
     const headerDetails: Record<string, Record<string, any> | null> = {}
 
     for (const [pageNum, pageContent] of Object.entries(textContent)) {
@@ -65,10 +65,11 @@ const identifyTableHeader = (textContent: Record<string, Record<string, any>>): 
             const continuationYKeys = new Set(sortedYs.slice(anchorIdx + 1, anchorIdx + 4));
 
             // Build columns from anchor lines
-            const columns: { text: string, x: number, y: number }[] = anchorLines.map((l: Record<string, any>) => ({
+            const columns: { text: string, x: number, y: number, endX: number }[] = anchorLines.map((l: Record<string, any>) => ({
                 text: l["text"].trim(),
                 x: l["x"],
-                y: l["y"]
+                y: l["y"],
+                endX: l["x"] + (l["bbox"]["w"])
             }));
 
             // Merge continuation lines into the closest-X anchor column
@@ -94,7 +95,7 @@ const identifyTableHeader = (textContent: Record<string, Record<string, any>>): 
         }
     }
 
-    const nonNullHeaderDetails: { [pageNum: string]: { y: number, columns: { text: string, x: number, y: number }[] } } = Object.fromEntries(Object.entries(headerDetails).filter(([_, details]) => details !== null) as Array<[string, { y: number, columns: { text: string, x: number, y: number }[] }]>)
+    const nonNullHeaderDetails: { [pageNum: string]: { y: number, columns: { text: string, x: number, y: number, endX: number }[] } } = Object.fromEntries(Object.entries(headerDetails).filter(([_, details]) => details !== null) as Array<[string, { y: number, columns: { text: string, x: number, y: number, endX: number }[] }]>)
     if (Object.keys(nonNullHeaderDetails).length === 0) {
         throw new Error("No transaction table header found in the PDF. The statement format may not be supported.");
     }
@@ -211,7 +212,7 @@ const _filterBlocksBelowHeader = (textContent: Record<string, Record<string, any
     );
 }
 
-const _groupColumnsPerPage = (rows: Record<string, any>[][], headerDetails: { text: string, x: number, y: number }[]) => {
+const _groupColumnsPerPage = (rows: Record<string, any>[][], headerDetails: { text: string, x: number, y: number, endX: number }[]) => {
     const sortedHeaders = [...headerDetails].sort((a, b) => a.x - b.x);
     const leftmostHeader = sortedHeaders[0]!;
     const secondHeader = sortedHeaders[1];
@@ -221,14 +222,14 @@ const _groupColumnsPerPage = (rows: Record<string, any>[][], headerDetails: { te
     for (const row of rows) {
         let column: { [header: string]: string[] } = Object.fromEntries(headerDetails.map(header => [header.text, []]));
         for (const line of row) {
-            const eligibleHeaders = sortedHeaders.filter(header => header.x < (line.x + line.bbox.w + 30));
+            const eligibleHeaders = sortedHeaders.filter(header => header.endX > line.x);
             const searchHeaders = eligibleHeaders.length > 0 ? eligibleHeaders : sortedHeaders;
             let closestHeader = searchHeaders[0]!;
-            for (const header of searchHeaders) {
-                if (Math.abs(line.x - header.x) < Math.abs(line.x - closestHeader.x)) {
-                    closestHeader = header;
-                }
-            }
+            // for (const header of searchHeaders) {
+            //     if (Math.abs(line.x - header.x) < Math.abs(line.x - closestHeader.x)) {
+            //         closestHeader = header;
+            //     }
+            // }
 
             // The leftmost column (Date) holds exactly one value — the date that opened this row.
             // Any subsequent line assigned to it is narration content whose X happens to be
@@ -326,4 +327,30 @@ const debugPDF = (pdfPath: string) => {
     }
 };
 
-export { buildTransactionData, debugPDF };
+// TODO: remove — temporary helper to inspect raw PDF rendering per page
+const savePageImages = (pdfPath: string, outDir: string = "assets/page_images", scale: number = 2) => {
+    const doc = mupdf.Document.openDocument(pdfPath).asPDF();
+    if (!doc) throw new Error(`Failed to open PDF: ${pdfPath}`);
+
+    if (doc.needsPassword()) {
+        const authenticated = doc.authenticatePassword(process.env.PDF_PASSWORD || "");
+        if (!authenticated) throw new Error(`Incorrect or missing password for PDF: ${pdfPath}`);
+    }
+
+    fs.mkdirSync(outDir, { recursive: true });
+
+    const pageCount = doc.countPages();
+    console.log(`[savePageImages] Rendering ${pageCount} page(s) at ${scale}x scale → ${outDir}`);
+
+    for (let i = 0; i < pageCount; i++) {
+        const page = doc.loadPage(i);
+        const matrix = mupdf.Matrix.scale(scale, scale);
+        const pixmap = page.toPixmap(matrix, mupdf.ColorSpace.DeviceRGB, false);
+        const pngData = pixmap.asPNG();
+        const outPath = `${outDir}/page_${i + 1}.png`;
+        fs.writeFileSync(outPath, pngData);
+        console.log(`[savePageImages]   page ${i + 1} → ${outPath}`);
+    }
+};
+
+export { buildTransactionData, debugPDF, savePageImages };

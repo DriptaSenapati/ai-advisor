@@ -18,16 +18,17 @@ function* batchTransactions(transactions: any[], batchSize: number = parseInt(pr
 
 
 const statementErrorFetcherNode: GraphNode<typeof agentGraphSchema> = async (state) => {
-    const total = (state.transactionData || []).length;
+    const transactionData = state.transactionData || [];
+    const total = transactionData.length;
     console.log(`[Error Fetcher] Scanning ${total} transactions for errors via LLM`);
 
     const errorData: { errorRows: any[] } = { errorRows: [] };
 
-    const columnOrder = Object.keys((state.transactionData || [])[0] || {})
+    const columnOrder = Object.keys(transactionData[0] || {})
         .filter(k => k !== (process.env.TEMP_ID_KEY || "tempId"))
         .join(" → ");
 
-    for (const batch of batchTransactions(state.transactionData || [])) {
+    for (const batch of batchTransactions(transactionData)) {
         const normDataList = (await Promise.all(batch.map(chunk => llmSystemMessage.pipe(structuredLlm).invoke({ extractedData: chunk, columnOrder })))).flat();
         errorData.errorRows.push(...normDataList.map(data => data.errorRows).flat());
     }
@@ -46,9 +47,7 @@ const statementErrorFetcherNode: GraphNode<typeof agentGraphSchema> = async (sta
         console.log(`[Error Fetcher] Saved ${errorData.errorRows.length} error(s) to ErrorPdfExtract`);
     }
 
-    return {
-        ...state, errorData: errorData
-    };
+    return {};
 }
 
 export { statementErrorFetcherNode };

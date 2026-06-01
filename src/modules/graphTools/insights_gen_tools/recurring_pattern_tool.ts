@@ -3,12 +3,10 @@ import z from "zod";
 import prisma from "../../../prismaClient.js";
 
 type RecurringCandidate = {
-    _id: { clusterId: { $oid: string }; debitAmount: number };
-    clusterId: { $oid: string };
+    _id: { merchantName: string; debitAmount: number };
     months: string[];
     monthCount: number;
     lastTransactionDate: { '$date': string };
-    merchantName: string | null;
     category: string | null;
 };
 
@@ -109,7 +107,7 @@ const recurringPatternTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
 
     const candidates = await prisma.finalTransactionData.aggregateRaw({
         pipeline: [
-            // Only expense transactions that belong to a cluster (optionally within the covered window)
+            // Only debit transactions belonging to a cluster
             {
                 $match: {
                     debitAmount: { $gt: 0 },
@@ -117,40 +115,7 @@ const recurringPatternTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
                     ...dateMatchClause,
                 },
             },
-            // Add month string per transaction
-            {
-                $addFields: {
-                    month: { $dateToString: { format: "%Y-%m", date: "$date" } },
-                },
-            },
-            // Deduplicate: one entry per (clusterId, debitAmount, month); carry max date of that month
-            {
-                $group: {
-                    _id: {
-                        clusterId: "$clusterId",
-                        debitAmount: "$debitAmount",
-                        month: "$month",
-                    },
-                    maxDateInMonth: { $max: "$date" },
-                },
-            },
-            // For each (cluster, exact amount) pair — collect the months it appeared in
-            {
-                $group: {
-                    _id: {
-                        clusterId: "$_id.clusterId",
-                        debitAmount: "$_id.debitAmount",
-                    },
-                    months: { $push: "$_id.month" },
-                    monthCount: { $sum: 1 },
-                    lastTransactionDate: { $max: "$maxDateInMonth" },
-                },
-            },
-            // Pre-filter: must appear in at least 3 months before checking consecutiveness
-            { $match: { monthCount: { $gte: 3 } } },
-            // Promote clusterId to top-level for $lookup
-            { $addFields: { clusterId: "$_id.clusterId" } },
-            // Join Cluster to get merchantName and category
+            // Join Cluster early to get merchantName and category
             {
                 $lookup: {
                     from: "Cluster",
@@ -160,15 +125,48 @@ const recurringPatternTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
                 },
             },
             { $unwind: "$cluster" },
+            // Exclude transfers, ATM, salary etc. that have no merchantName
+            { $match: { "cluster.merchantName": { $ne: null } } },
+            // Add month string per transaction
+            {
+                $addFields: {
+                    month: { $dateToString: { format: "%Y-%m", date: "$date" } },
+                },
+            },
+            // Deduplicate: one entry per (merchantName, debitAmount, month)
+            {
+                $group: {
+                    _id: {
+                        merchantName: "$cluster.merchantName",
+                        debitAmount: "$debitAmount",
+                        month: "$month",
+                    },
+                    maxDateInMonth: { $max: "$date" },
+                    category: { $first: "$cluster.category" },
+                },
+            },
+            // For each (merchantName, exact amount) pair — collect the months it appeared in
+            {
+                $group: {
+                    _id: {
+                        merchantName: "$_id.merchantName",
+                        debitAmount: "$_id.debitAmount",
+                    },
+                    months: { $push: "$_id.month" },
+                    monthCount: { $sum: 1 },
+                    lastTransactionDate: { $max: "$maxDateInMonth" },
+                    category: { $first: "$category" },
+                },
+            },
+            // Pre-filter: must appear in at least 3 months
+            { $match: { monthCount: { $gte: 3 } } },
             {
                 $project: {
                     _id: 1,
-                    clusterId: 1,
                     months: 1,
                     monthCount: 1,
                     lastTransactionDate: 1,
-                    merchantName: "$cluster.merchantName",
-                    category: "$cluster.category",
+                    category: 1,
                 },
             },
         ],
@@ -181,31 +179,18 @@ const recurringPatternTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
     let upserted = 0;
 
     for (const candidate of recurring) {
-        const clusterId = candidate.clusterId.$oid;
+        const merchantName = candidate._id.merchantName;
         const estimatedMonthlyAmount = candidate._id.debitAmount;
         const frequency = detectFrequency(candidate.months, differenceInMonths)!;
         const isActive = checkIsActive(candidate.months, maxTransactionDate);
         const cancellable = isCancellable(candidate.category);
-
         const lastTransactionDate = new Date(candidate.lastTransactionDate.$date);
 
-        const data = {
-            merchantName: candidate.merchantName,
-            category: candidate.category,
-            estimatedMonthlyAmount,
-            frequency,
-            monthsDetected: candidate.monthCount,
-            isCancellable: cancellable,
-            isActive,
-            lastTransactionDate,
-        };
-
-        const existing = await prisma.recurringPattern.findFirst({ where: { clusterId } });
-        if (existing) {
-            await prisma.recurringPattern.update({ where: { id: existing.id }, data });
-        } else {
-            await prisma.recurringPattern.create({ data: { clusterId, ...data } });
-        }
+        await prisma.recurringPattern.upsert({
+            where: { merchantName_estimatedMonthlyAmount: { merchantName, estimatedMonthlyAmount } },
+            update: { category: candidate.category, frequency, monthsDetected: candidate.monthCount, isCancellable: cancellable, isActive, lastTransactionDate },
+            create: { merchantName, category: candidate.category, estimatedMonthlyAmount, frequency, monthsDetected: candidate.monthCount, isCancellable: cancellable, isActive, lastTransactionDate },
+        });
 
         upserted++;
     }

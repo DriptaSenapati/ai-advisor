@@ -2,8 +2,10 @@
  * ── Advisor graph (default) ─────────────────────────────────────────────────
  *   npm run reset:db                              # clear everything
  *   npm run reset:db -- --stage=normalize         # clear from normalize onwards
+ *   npm run reset:db -- --stage=balance           # reset balanceGaps + extractionConfidence on StatementMetadata
  *   npm run reset:db -- --stage=categorize        # clear FinalTransactionData + Cluster
  *   npm run reset:db -- --stage=llm              # reset Cluster category fields to null
+ *   npm run reset:db -- --stage=metadata         # clear only StatementMetadata
  *
  * ── Insights graph ───────────────────────────────────────────────────────────
  *   npm run reset:db -- --graph=insights                      # clear all insight collections
@@ -20,7 +22,7 @@ const stage = process.argv.find(a => a.startsWith("--stage="))?.split("=")[1] ??
 
 // ── advisor graph ─────────────────────────────────────────────────────────────
 
-const ADVISOR_VALID_STAGES = ["all", "normalize", "categorize", "llm"] as const;
+const ADVISOR_VALID_STAGES = ["all", "normalize", "balance", "categorize", "llm", "metadata"] as const;
 type AdvisorStage = typeof ADVISOR_VALID_STAGES[number];
 
 async function resetAdvisor(s: AdvisorStage) {
@@ -33,7 +35,20 @@ async function resetAdvisor(s: AdvisorStage) {
             await prisma.normalizedTransactions.deleteMany();
             await prisma.exceptionTransactions.deleteMany();
             await prisma.errorPdfExtract.deleteMany();
-            console.log("Cleared: FinalTransactionData, RecurringPattern, Cluster, NormalizedTransactions, ExceptionTransactions, ErrorPdfExtract");
+            await prisma.statementExtractedData.deleteMany();
+            await prisma.statementMetadata.deleteMany();
+            console.log("Cleared: FinalTransactionData, RecurringPattern, Cluster, NormalizedTransactions, ExceptionTransactions, ErrorPdfExtract, StatementExtractedData, StatementMetadata");
+            break;
+
+        case "balance":
+            await prisma.statementMetadata.updateMany({
+                data: {
+                    balanceGaps: [],
+                    balanceGapCount: null,
+                    extractionConfidence: null,
+                },
+            });
+            console.log("Reset StatementMetadata: balanceGaps, balanceGapCount, extractionConfidence cleared");
             break;
 
         case "categorize":
@@ -53,6 +68,12 @@ async function resetAdvisor(s: AdvisorStage) {
                 },
             });
             console.log("Reset Cluster: category fields set back to null");
+            break;
+
+        case "metadata":
+            await prisma.statementExtractedData.deleteMany();
+            await prisma.statementMetadata.deleteMany();
+            console.log("Cleared: StatementExtractedData, StatementMetadata");
             break;
     }
 }

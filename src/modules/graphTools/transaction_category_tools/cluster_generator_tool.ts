@@ -1,6 +1,6 @@
 import { tool } from "langchain";
 import z from "zod";
-import { genericTransactionDataSchema, parseTransactionDate } from "../../../helpers/index.js";
+import { genericTransactionDataSchema } from "../../../helpers/index.js";
 import { embeddingsModel } from "../../../models/index.js";
 import prisma from "../../../prismaClient.js";
 
@@ -34,6 +34,7 @@ const performDescriptionClustering = async (transactions: {
     description: string;
     id: string;
 }[]) => {
+    if (!process.env.TRAN_VECTOR_INDEX_NAME) throw new Error("TRAN_VECTOR_INDEX_NAME env var is not set");
     let descriptionPool = transactions
 
     let clusters: { transactionIds: string[], centroid: string }[] = [];
@@ -143,57 +144,46 @@ const performDescriptionClustering = async (transactions: {
 
 
 const clusterGeneratorTool = tool(async (input) => {
-    const { transactionData, statementMetadataId } = input;
-    if (!transactionData || transactionData.length === 0) {
-        throw new Error("transactionData is required.");
+    const { statementMetadataId } = input;
+
+    const normalizedTransactions = await prisma.normalizedTransactions.findMany({
+        where: { statementMetadataId: statementMetadataId ?? null },
+        select: { description: true, date: true, creditAmount: true, debitAmount: true, balance: true },
+    });
+    if (normalizedTransactions.length === 0) {
+        throw new Error("No normalized transactions found for this statement.");
     }
 
-
-    const descriptions = transactionData.map(transaction => descriptionCleaner(transaction.description));
+    const descriptions = normalizedTransactions.map(t => descriptionCleaner(t.description));
     console.log(`[Cluster Tool] Generating embeddings for ${descriptions.length} descriptions...`);
     const descriptionEmbeddings = await createEmbeddings(descriptions);
     console.log(`[Cluster Tool] Embeddings ready — saving to FinalTransactionData`);
 
-    const categorizedTransactions = transactionData.map((transaction, index) => ({
-        ...transaction,
-        descriptionVector: descriptionEmbeddings[index] || [],
-    }));
-
-    // push to mongoDB
     await prisma.finalTransactionData.createMany({
-        data: categorizedTransactions.map((transaction) => ({
-            date: parseTransactionDate(transaction.date) || new Date(0),
-            creditAmount: parseFloat((transaction.creditAmount || "0").replace(/,/g, "")),
-            debitAmount: parseFloat((transaction.debitAmount || "0").replace(/,/g, "")),
-            balance: parseFloat((transaction.balance || "0").replace(/,/g, "")),
-            description: descriptionCleaner(transaction.description || ""),
-            descriptionVector: transaction.descriptionVector,
+        data: normalizedTransactions.map((t, index) => ({
+            date: t.date,
+            creditAmount: t.creditAmount,
+            debitAmount: t.debitAmount,
+            balance: t.balance,
+            description: descriptionCleaner(t.description),
+            descriptionVector: descriptionEmbeddings[index] || [],
             statementMetadataId: statementMetadataId ?? null,
         })),
-    })
+    });
 
     const transIds = await prisma.finalTransactionData.findMany({ select: { id: true, description: true, descriptionVector: true } });
-    console.log(`[Cluster Tool] Saved ${categorizedTransactions.length} transactions — fetched ${transIds.length} total from DB for clustering`);
+    console.log(`[Cluster Tool] Saved ${normalizedTransactions.length} transactions — fetched ${transIds.length} total from DB for clustering`);
 
     await performDescriptionClustering(transIds).catch(console.error);
 
-
-
-    return categorizedTransactions;
+    return "ok";
 },
     {
         name: "category-generator-tool",
-        description: `A tool to generate category for each transaction based on the transaction data. 
-        It takes an array of transactions as input and returns an array of transactions with category and category score added to each transaction. 
-        The category is generated based on the description, credit amount, debit amount and balance of the transaction. 
-        The category score is a confidence score for the assigned category. 
-        The output of this tool will be used as input for the final statement generation tool.
-        Also created description clustering vector and stored in the database for future use.`,
+        description: `Embeds transaction descriptions, saves to FinalTransactionData, and clusters by similarity. Reads from NormalizedTransactions by statementMetadataId.`,
         schema: z.object({
-            transactionData: z.array(genericTransactionDataSchema),
             statementMetadataId: z.string().optional().describe("ID of the StatementMetadata record for this upload"),
         })
-
     }
 )
 

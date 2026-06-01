@@ -77,7 +77,6 @@ model Cluster {
   centroid                 String
   createdAt                DateTime               @default(now())
   updatedAt                DateTime               @updatedAt
-  recurringPatterns        RecurringPattern[]
 }
 
 model MonthlyStats {
@@ -100,9 +99,7 @@ model MonthlyStats {
 
 model RecurringPattern {
   id                     String    @id @default(auto()) @map("_id") @db.ObjectId
-  clusterId              String    @db.ObjectId
-  cluster                Cluster   @relation(fields: [clusterId], references: [id])
-  merchantName           String?
+  merchantName           String
   category               String?
   estimatedMonthlyAmount Float
   frequency              String
@@ -112,6 +109,8 @@ model RecurringPattern {
   lastTransactionDate    DateTime?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
+
+  @@unique([merchantName, estimatedMonthlyAmount])
 }
 
 model InsightReport {
@@ -135,6 +134,14 @@ model Goal {
   updatedAt      DateTime @updatedAt
 }
 
+model StatementExtractedData {
+  id                  String            @id @default(auto()) @map("_id") @db.ObjectId
+  statementMetadataId String            @unique @db.ObjectId
+  statementMetadata   StatementMetadata @relation(fields: [statementMetadataId], references: [id])
+  rows                Json[]
+  createdAt           DateTime          @default(now())
+}
+
 model ErrorPdfExtract {
   id                  String             @id @default(auto()) @map("_id") @db.ObjectId
   action              String
@@ -151,6 +158,8 @@ model StatementMetadata {
   statementPeriodStart   DateTime?
   statementPeriodEnd     DateTime?
   contentHash            String                   @unique
+  keyMapping             Json?
+  extractedData          StatementExtractedData?
   totalTransactions      Int?
   exceptionCount         Int?
   normalizerStatus       String                   @default("Processing") // "Processing" | "Completed" | "Error"
@@ -161,6 +170,9 @@ model StatementMetadata {
   normalizedTransactions NormalizedTransactions[] @relation("NormalizedTransactionsMetadata")
   exceptionTransactions  ExceptionTransactions[]  @relation("ExceptionTransactionsMetadata")
   errorPdfExtracts       ErrorPdfExtract[]        @relation("ErrorPdfExtractMetadata")
+  balanceGaps            Json[]
+  balanceGapCount        Int?
+  extractionConfidence   Float?
   createdAt              DateTime                 @default(now())
   updatedAt              DateTime                 @updatedAt
 }

@@ -6,8 +6,8 @@ import { parseTransactionDate } from "../../../helpers/index.js";
 const cleanAmount = (s: string) => s.replace(/,/g, "").replace(/(?:Cr|Dr)$/i, "").trim();
 
 const parseAmount = (amountStr: string): boolean => {
-    const amountRegex = /(?<!\w)(?:₹|Rs\.?|INR|\$|€|£)?\s?-?(?:\d{1,3}(?:,\d{2,3})*|\d+)(?:\.\d{1,2})?(?:Cr|Dr)?(?!\w)/i;
-    return amountRegex.test(amountStr)
+    const amountRegex = /^(?:₹|Rs\.?|INR|\$|€|£)?\s?-?(?:\d{1,3}(?:,\d{2,3})*|\d+)(?:\.\d{1,2})?(?:\s?(?:Cr|Dr))?$/i;
+    return amountRegex.test(amountStr.trim());
 };
 
 const parseDate = (dateStr: string): boolean => {
@@ -35,13 +35,16 @@ const statementExceptionFinalTool = tool(async (input) => {
         throw new Error("correctedData is required.");
     }
     let exceptions = [];
+    let normTransactions = [];
     for (const row of correctedData) {
         if (!creditDebitValidator({ creditAmount: row.creditAmount || "", debitAmount: row.debitAmount || "" }) || !parseDate(row.date || "") || !parseAmount(row.balance || "")) {
             exceptions.push(row);
+        } else {
+            normTransactions.push(row);
         }
     }
 
-    const nanRows = correctedData.filter(data =>
+    const nanRows = normTransactions.filter(data =>
         isNaN(parseFloat(cleanAmount(data.balance || "0"))) ||
         isNaN(parseFloat(cleanAmount(data.creditAmount || "0"))) ||
         isNaN(parseFloat(cleanAmount(data.debitAmount || "0")))
@@ -51,12 +54,12 @@ const statementExceptionFinalTool = tool(async (input) => {
     }
 
     await prisma.normalizedTransactions.createMany({
-        data: correctedData.map(data => ({
+        data: normTransactions.map(data => ({
             date: parseTransactionDate(data.date || "") || new Date(0),
             description: data.description || "",
-            creditAmount: parseFloat(cleanAmount(data.creditAmount || "0")) || 0,
-            debitAmount: parseFloat(cleanAmount(data.debitAmount || "0")) || 0,
-            balance: parseFloat(cleanAmount(data.balance || "0")) || 0,
+            creditAmount: parseFloat(cleanAmount(data.creditAmount || "0")),
+            debitAmount: parseFloat(cleanAmount(data.debitAmount || "0")),
+            balance: parseFloat(cleanAmount(data.balance || "0")),
             statementMetadataId: statementMetadataId ?? null,
         }))
     });
@@ -75,7 +78,7 @@ const statementExceptionFinalTool = tool(async (input) => {
     }
 
     if (statementMetadataId) {
-        const parsedDates = correctedData
+        const parsedDates = normTransactions
             .map(d => parseTransactionDate(d.date || ""))
             .filter((d): d is Date => d !== null && d.getTime() !== new Date(0).getTime());
 
@@ -87,14 +90,14 @@ const statementExceptionFinalTool = tool(async (input) => {
             data: {
                 statementPeriodStart: periodStart,
                 statementPeriodEnd: periodEnd,
-                totalTransactions: correctedData.length,
+                totalTransactions: normTransactions.length,
                 exceptionCount: exceptions.length,
                 normalizerStatus: "Completed",
             }
         });
     }
 
-    return exceptions;
+    return { exceptions, normTransactions };
 
 },
     {

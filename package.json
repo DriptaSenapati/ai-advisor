@@ -8,11 +8,14 @@
     "dev:checkpoint": "cross-env NODE_ENV=development tsx src/scripts/checkpoint-runner.ts",
     "reset:db": "cross-env NODE_ENV=development tsx src/scripts/reset-db.ts",
     "extract:pdf": "cross-env NODE_ENV=development tsx src/scripts/pdf-extractor-runner.ts",
+    "extract:gcloud": "cross-env NODE_ENV=development tsx src/scripts/gcloud-extractor-runner.ts",
     "build": "tsc",
     "start": "cross-env NODE_ENV=production node build/index.js",
     "test": "echo \"Error: no test specified\" && exit 1",
     "prisma:generate": "cross-env NODE_ENV=development npx prisma generate",
-    "prisma:push": "cross-env NODE_ENV=development npx prisma db push"
+    "prisma:push": "cross-env NODE_ENV=development npx prisma db push",
+    "analyze:balance": "cross-env NODE_ENV=development tsx src/scripts/balance-analyzer-runner.ts",
+    "graph:visualize": "cross-env NODE_ENV=development tsx src/scripts/graph-visualizer.ts"
   },
   "keywords": [],
   "author": "",
@@ -30,6 +33,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@google-cloud/documentai": "^9.6.1",
     "@langchain/core": "^1.1.33",
     "@langchain/langgraph": "^1.2.5",
     "@langchain/ollama": "^1.2.6",
@@ -37,6 +41,7 @@
     "@prisma/client": "6.19",
     "dotenv": "^17.3.1",
     "langchain": "^1.2.33",
+    "moment": "^2.30.1",
     "mongodb": "^7.1.1",
     "mupdf": "^1.27.0",
     "uuid": "^13.0.0",
