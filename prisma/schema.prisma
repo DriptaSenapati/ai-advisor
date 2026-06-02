@@ -155,6 +155,7 @@ model ErrorPdfExtract {
 model StatementMetadata {
   id                     String                   @id @default(auto()) @map("_id") @db.ObjectId
   bankName               String
+  accountNumber          String?
   statementPeriodStart   DateTime?
   statementPeriodEnd     DateTime?
   contentHash            String                   @unique

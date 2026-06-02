@@ -1,6 +1,8 @@
 import { GraphNode } from "@langchain/langgraph";
 import { agentGraphSchema } from "../../../graph_state.js";
 import { statementExceptionFinalTool } from "../../graphTools/statement_normalizer_tools/statement_exception_final_tool.js";
+
+
 const statementExceptionFinalToolNode: GraphNode<typeof agentGraphSchema> = async (state) => {
     const correctedData = state.transactionData || [];
     console.log(`[Exception Handler] Validating and saving ${correctedData.length} transactions to DB`);

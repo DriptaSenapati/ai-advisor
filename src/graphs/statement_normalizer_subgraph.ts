@@ -13,7 +13,9 @@ const statementNormalizerSubgraph = new StateGraph(agentGraphSchema)
     .addNode("statementCorrectionToolNode", statementCorrectionToolNode)
     .addNode("statementExceptionFinalToolNode", statementExceptionFinalToolNode)
 
-    .addEdge(START, "keyMapperNode")
+    .addConditionalEdges(START, (state: any) =>
+        state.isImageBased ? "statementErrorFetchNode" : "keyMapperNode"
+    )
     .addEdge("keyMapperNode", "tranKeyNormToolNode")
     .addEdge("tranKeyNormToolNode", "statementErrorFetchNode")
     .addEdge("statementErrorFetchNode", "statementCorrectionToolNode")

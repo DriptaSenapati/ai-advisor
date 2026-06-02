@@ -327,8 +327,37 @@ const debugPDF = (pdfPath: string) => {
     }
 };
 
-// TODO: remove — temporary helper to inspect raw PDF rendering per page
-const savePageImages = (pdfPath: string, outDir: string = "assets/page_images", scale: number = 2) => {
+const IMAGE_BASED_CHAR_THRESHOLD = 50;
+
+const isImageBasedPdf = (pdfPath: string): boolean => {
+    const doc = mupdf.Document.openDocument(pdfPath).asPDF();
+    if (!doc) throw new Error(`Failed to open PDF: ${pdfPath}`);
+    if (doc.needsPassword()) {
+        const authenticated = doc.authenticatePassword(process.env.PDF_PASSWORD || "");
+        if (!authenticated) throw new Error(`Incorrect or missing password for PDF: ${pdfPath}`);
+    }
+    let totalChars = 0;
+    const pageCount = doc.countPages();
+    for (let i = 0; i < pageCount; i++) {
+        const page = doc.loadPage(i);
+        const text = page.toStructuredText("preserve-spans").asText();
+        totalChars += text.length;
+        if (totalChars >= IMAGE_BASED_CHAR_THRESHOLD) return false;
+    }
+    return true;
+};
+
+const getPageCount = (pdfPath: string): number => {
+    const doc = mupdf.Document.openDocument(pdfPath).asPDF();
+    if (!doc) throw new Error(`Failed to open PDF: ${pdfPath}`);
+    if (doc.needsPassword()) {
+        const authenticated = doc.authenticatePassword(process.env.PDF_PASSWORD || "");
+        if (!authenticated) throw new Error(`Incorrect or missing password for PDF: ${pdfPath}`);
+    }
+    return doc.countPages();
+};
+
+const getPageAsBase64 = (pdfPath: string, pageIndex: number = 0, scale: number = 2): string => {
     const doc = mupdf.Document.openDocument(pdfPath).asPDF();
     if (!doc) throw new Error(`Failed to open PDF: ${pdfPath}`);
 
@@ -337,20 +366,9 @@ const savePageImages = (pdfPath: string, outDir: string = "assets/page_images", 
         if (!authenticated) throw new Error(`Incorrect or missing password for PDF: ${pdfPath}`);
     }
 
-    fs.mkdirSync(outDir, { recursive: true });
-
-    const pageCount = doc.countPages();
-    console.log(`[savePageImages] Rendering ${pageCount} page(s) at ${scale}x scale → ${outDir}`);
-
-    for (let i = 0; i < pageCount; i++) {
-        const page = doc.loadPage(i);
-        const matrix = mupdf.Matrix.scale(scale, scale);
-        const pixmap = page.toPixmap(matrix, mupdf.ColorSpace.DeviceRGB, false);
-        const pngData = pixmap.asPNG();
-        const outPath = `${outDir}/page_${i + 1}.png`;
-        fs.writeFileSync(outPath, pngData);
-        console.log(`[savePageImages]   page ${i + 1} → ${outPath}`);
-    }
+    const page = doc.loadPage(pageIndex);
+    const pixmap = page.toPixmap(mupdf.Matrix.scale(scale, scale), mupdf.ColorSpace.DeviceRGB, false);
+    return Buffer.from(pixmap.asPNG()).toString("base64");
 };
 
-export { buildTransactionData, debugPDF, savePageImages };
+export { buildTransactionData, debugPDF, getPageAsBase64, getPageCount, isImageBasedPdf };

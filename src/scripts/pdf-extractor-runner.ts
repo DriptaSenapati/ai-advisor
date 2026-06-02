@@ -5,34 +5,21 @@
  *   npm run extract:pdf                                 # uses default path
  *   npm run extract:pdf -- --pdf=assets\2025_statement.pdf
  *   npm run extract:pdf -- --pdf=assets\2025_statement.pdf --out=my_output.json
- *   npm run extract:pdf -- --images                     # render each page as PNG → assets/page_images/
- *   npm run extract:pdf -- --images --scale=3           # 3× resolution (default: 2)
- *   npm run extract:pdf -- --images --imgout=my_dir     # custom output directory
  */
 
 import "../envConfig.js";
 import fs from "fs";
 import path from "path";
-import { buildTransactionData, debugPDF, savePageImages } from "../modules/pdf/pdf_extractor.js";
+import { buildTransactionData, debugPDF } from "../modules/pdf/pdf_extractor.js";
 
 const pdfArg = process.argv.find(a => a.startsWith("--pdf="))?.split("=")[1];
 const outArg = process.argv.find(a => a.startsWith("--out="))?.split("=")[1];
 const isDebug = process.argv.includes("--debug");
-const isImages = process.argv.includes("--images");
-const imgOutArg = process.argv.find(a => a.startsWith("--imgout="))?.split("=")[1];
-const scaleArg = process.argv.find(a => a.startsWith("--scale="))?.split("=")[1];
 
 const PDF_PATH = pdfArg ?? "assets\\2025_statement.pdf";
 const OUT_PATH = outArg ?? "extracted_data.json";
 
 console.log(`[PDF Runner] Reading: ${PDF_PATH}`);
-
-if (isImages) {
-    const imgOut = imgOutArg ?? "assets/page_images";
-    const scale = scaleArg ? parseFloat(scaleArg) : 2;
-    savePageImages(PDF_PATH, imgOut, scale);
-    process.exit(0);
-}
 
 if (isDebug) {
     debugPDF(PDF_PATH);

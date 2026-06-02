@@ -78,12 +78,27 @@ const statementExceptionFinalTool = tool(async (input) => {
     }
 
     if (statementMetadataId) {
-        const parsedDates = normTransactions
-            .map(d => parseTransactionDate(d.date || ""))
-            .filter((d): d is Date => d !== null && d.getTime() !== new Date(0).getTime());
+        const existing = await prisma.statementMetadata.findUnique({
+            where: { id: statementMetadataId },
+            select: { statementPeriodStart: true, statementPeriodEnd: true },
+        });
 
-        const periodStart = parsedDates.length > 0 ? new Date(Math.min(...parsedDates.map(d => d.getTime()))) : null;
-        const periodEnd = parsedDates.length > 0 ? new Date(Math.max(...parsedDates.map(d => d.getTime()))) : null;
+        const datesAlreadySet = !!(existing?.statementPeriodStart && existing?.statementPeriodEnd);
+
+        let periodStart: Date | null = existing?.statementPeriodStart ?? null;
+        let periodEnd: Date | null = existing?.statementPeriodEnd ?? null;
+
+        if (!datesAlreadySet) {
+            console.log("[Exception Handler] Statement dates not set — computing from transaction range");
+            const parsedDates = normTransactions
+                .map(d => parseTransactionDate(d.date || ""))
+                .filter((d): d is Date => d !== null && d.getTime() !== new Date(0).getTime());
+
+            periodStart = parsedDates.length > 0 ? new Date(Math.min(...parsedDates.map(d => d.getTime()))) : null;
+            periodEnd = parsedDates.length > 0 ? new Date(Math.max(...parsedDates.map(d => d.getTime()))) : null;
+        } else {
+            console.log("[Exception Handler] Statement dates already set from LLM extraction — skipping date range computation");
+        }
 
         await prisma.statementMetadata.update({
             where: { id: statementMetadataId },

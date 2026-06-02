@@ -1,4 +1,4 @@
-import { ChatPromptTemplate } from "@langchain/core/prompts";
+import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
 // import { ChatOllama } from "@langchain/ollama";
 import { ChatOpenAI, OpenAIEmbeddings } from "@langchain/openai";
 import z from "zod";
@@ -104,6 +104,23 @@ const insightsGenllmSchema = z.object({
     }),
 })
 
+const imagePdfExtractionSchema = z.object({
+    rows: z.array(z.object({
+        date: z.string().describe("Transaction date in ISO format YYYY-MM-DD"),
+        description: z.string().describe("Transaction description as shown on statement"),
+        creditAmount: z.number().describe("Deposit/credit amount as a number, 0 if this is a debit transaction"),
+        debitAmount: z.number().describe("Withdrawal/debit amount as a number, 0 if this is a credit transaction"),
+        balance: z.number().describe("Closing balance after this transaction"),
+    }))
+});
+
+const basicDetailsExtractionSchema = z.object({
+    bankName: z.string().describe("Name of the bank from which statement is extracted"),
+    statementStartDate: z.string().describe("Start date of the statement period in ISO format"),
+    statementEndDate: z.string().describe("End date of the statement period in ISO format"),
+    accountNumber: z.string().describe("Bank account number associated with the statement"),
+})
+
 
 
 const structuredLlm = normalizerLLM.withStructuredOutput(transactionErrorSchema);
@@ -111,6 +128,8 @@ const keyMapperLlm = normalizerLLM.withStructuredOutput(keyMapperSchema);
 const feedbackLoopLlm = normalizerLLM.withStructuredOutput(feedbackloopLLMSchema);
 const clusterCategorizationLlm = normalizerLLM.withStructuredOutput(clusterCategorizationLLMSchema);
 const insightsGenLlm = normalizerLLM.withStructuredOutput(insightsGenllmSchema);
+const basicDetailsExtractionLlm = normalizerLLM.withStructuredOutput(basicDetailsExtractionSchema);
+const imagePdfExtractionLlm = normalizerLLM.withStructuredOutput(imagePdfExtractionSchema);
 
 // const llmSystemMessage = ChatPromptTemplate.fromTemplate(`
 //     You are a deterministic error handler.
@@ -318,6 +337,30 @@ Tier rules:
 - Tier 3: generate all sections`],
 ])
 
+const imagePdfExtractionPrompt = ChatPromptTemplate.fromMessages([
+    ["system", `You are a bank statement transaction extractor.
+Extract all transaction rows from the provided bank statement page image.
+
+Skip: table headers, opening/closing balance summary rows, page headers/footers, subtotals.
+Return only actual transaction rows.
+
+Numbers must not contain commas or currency symbols.
+If no transactions are present on this page, return an empty rows array.`],
+    new MessagesPlaceholder("humanMessage"),
+]);
+
+const basicDetailsExtractionPrompt = ChatPromptTemplate.fromMessages([
+    ["system", `You are a bank statement metadata extractor.
+Extract the following fields from the provided bank statement page image:
+- bankName: the name of the bank (e.g. "HDFC Bank", "Kotak Mahindra Bank")
+- accountNumber: the customer account number shown on the statement
+- statementStartDate: the start date of the statement period in ISO format (YYYY-MM-DD)
+- statementEndDate: the end date of the statement period in ISO format (YYYY-MM-DD)
+
+Return an empty string for any field that is not visible or cannot be determined.`],
+    new MessagesPlaceholder("humanMessage"),
+]);
+
 const embeddingsModel = new OpenAIEmbeddings({
     model: "text-embedding-3-small",
     batchSize: 512,
@@ -327,5 +370,7 @@ const embeddingsModel = new OpenAIEmbeddings({
 
 export {
     structuredLlm, llmSystemMessage, llmSystemMessageKeyMapper, keyMapperLlm, embeddingsModel, llmSystemMessageFeedbackLoop, feedbackLoopLlm,
-    categorySystemMessage, clusterCategorizationLlm, insightsGenLlm, insightSystemMessage
+    categorySystemMessage, clusterCategorizationLlm, insightsGenLlm, insightSystemMessage,
+    basicDetailsExtractionLlm, basicDetailsExtractionPrompt,
+    imagePdfExtractionLlm, imagePdfExtractionPrompt,
 };
