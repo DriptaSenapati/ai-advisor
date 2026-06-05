@@ -21,7 +21,7 @@
 import "../envConfig.js";
 
 const CHECKPOINT_DB = "./dev-checkpoints.sqlite";
-const PDF_PATH = "assets\\hsbc_statement.pdf";
+const PDF_PATH = "assets\\2025_statement.pdf";
 
 // ── shared arg parsing ────────────────────────────────────────────────────────
 

@@ -70,6 +70,7 @@ model Cluster {
   id                       String                 @id @default(auto()) @map("_id") @db.ObjectId
   transactions             FinalTransactionData[]
   clusterLength            Int
+  bankName                 String?
   merchantName             String?
   category                 String?
   confidence               Float?

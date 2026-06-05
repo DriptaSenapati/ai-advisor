@@ -1,8 +1,9 @@
 import { tool } from "langchain";
 import z from "zod";
-import { genericTransactionDataSchema } from "../../../helpers/index.js";
 import { embeddingsModel } from "../../../models/index.js";
 import prisma from "../../../prismaClient.js";
+
+type TxnVector = { id: string; description: string; descriptionVector: number[] };
 
 function seededRandom(seed: number) {
     return function () {
@@ -16,138 +17,189 @@ function seededRandom(seed: number) {
 const rand = seededRandom(42);
 
 const createEmbeddings = async (text: string[]): Promise<number[][]> => {
-    const embedding = await embeddingsModel.embedDocuments(text);
-    return embedding;
+    return embeddingsModel.embedDocuments(text);
 };
 
 const descriptionCleaner = (description: string): string => {
-    const cleaned = description
+    return description
         .replace(/\d+/g, "")
         .replace(/[^a-zA-Z ]/g, " ")
         .replace(/\s+/g, " ")
         .toLowerCase();
-    return cleaned;
-}
+};
 
-const performDescriptionClustering = async (transactions: {
-    descriptionVector: number[];
-    description: string;
-    id: string;
-}[]) => {
+const CLUSTER_BATCH_SIZE = 5;
+
+// ── Fresh clustering for first upload of a bank (0.9 threshold) ───────────────
+const performDescriptionClustering = async (transactions: TxnVector[], bankName: string) => {
     if (!process.env.TRAN_VECTOR_INDEX_NAME) throw new Error("TRAN_VECTOR_INDEX_NAME env var is not set");
-    let descriptionPool = transactions
 
-    let clusters: { transactionIds: string[], centroid: string }[] = [];
+    let descriptionPool = transactions;
+    const clusters: { transactionIds: string[]; centroid: string }[] = [];
 
-    console.log(`Starting description clustering for ${descriptionPool.length} transactions...`);
+    console.log(`[Cluster Tool] Fresh clustering — ${descriptionPool.length} transactions`);
     await new Promise(res => setTimeout(res, 2000));
-
 
     while (descriptionPool.length > 0) {
         const randomSeed = Math.floor(rand() * descriptionPool.length) + 1;
         const seedTransaction = descriptionPool[randomSeed - 1];
         if (!seedTransaction) throw new Error("Seed transaction not found in the description pool.");
-        const emb = seedTransaction.descriptionVector;
-        let localClusters: { transactionIds: string[], centroid: string } = { transactionIds: [], centroid: seedTransaction.description };
 
-        let merchantCategoriesSearchResult: { description: string; similarity: number; _id: { '$oid': string } }[] = [];
+        const localCluster: { transactionIds: string[]; centroid: string } = {
+            transactionIds: [],
+            centroid: seedTransaction.description,
+        };
 
         const poolIds = descriptionPool.map(d => ({ '$oid': d.id }));
         const numCandidates = Math.min(10000, Math.max(150, descriptionPool.length * 10));
 
+        let searchResult: { description: string; similarity: number; _id: { '$oid': string } }[] = [];
         while (true) {
-            merchantCategoriesSearchResult = await prisma.finalTransactionData.aggregateRaw({
+            searchResult = await prisma.finalTransactionData.aggregateRaw({
                 pipeline: [
-                    {
-                        '$vectorSearch': {
-                            'index': process.env.TRAN_VECTOR_INDEX_NAME,
-                            'path': 'descriptionVector',
-                            'queryVector': emb,
-                            'numCandidates': numCandidates,
-                            'limit': numCandidates
-                        }
-                    },
-                    {
-                        '$match': { '_id': { '$in': poolIds } }
-                    },
-                    {
-                        "$project": {
-                            "_id": 1,
-                            "description": 1,
-                            "similarity": { "$meta": "vectorSearchScore" }
-                        }
-                    }
-                ]
+                    { '$vectorSearch': { 'index': process.env.TRAN_VECTOR_INDEX_NAME, 'path': 'descriptionVector', 'queryVector': seedTransaction.descriptionVector, 'numCandidates': numCandidates, 'limit': numCandidates } },
+                    { '$match': { '_id': { '$in': poolIds } } },
+                    { '$project': { '_id': 1, 'description': 1, 'similarity': { '$meta': 'vectorSearchScore' } } },
+                ],
             }) as unknown as { description: string; similarity: number; _id: { '$oid': string } }[];
 
-            if (merchantCategoriesSearchResult.length > 0) {
-                break;
-            } else {
-                console.log(`No search results found for seed description: "${seedTransaction.description}". Retrying after a short delay...`);
-                await new Promise(res => setTimeout(res, 2000));
+            if (searchResult.length > 0) break;
+            console.log(`[Cluster Tool] No results for "${seedTransaction.description}" — retrying...`);
+            await new Promise(res => setTimeout(res, 2000));
+        }
+
+        for (const result of searchResult) {
+            if (result.similarity > 0.9) {
+                localCluster.transactionIds.push(result._id['$oid'].toString());
             }
         }
 
-
-        for (const result of merchantCategoriesSearchResult) {
-            const highSimilarity = result.similarity > 0.9;
-            if (highSimilarity) {
-                localClusters.transactionIds.push(result._id['$oid'].toString());
-            }
-        }
-        // localClusters.push({ transactionId: seedTransaction.id.toString() });
-
-        console.log(`Formed a cluster of size ${localClusters.transactionIds.length} with seed description: "${seedTransaction!.description}"`);
-        descriptionPool = descriptionPool.filter(desc => !localClusters.transactionIds.some(cluster => cluster === desc.id));
-        console.log(`Remaining descriptions to cluster: ${descriptionPool.length}`);
-        clusters.push(localClusters);
+        console.log(`[Cluster Tool] Cluster of size ${localCluster.transactionIds.length} — "${seedTransaction.description}"`);
+        descriptionPool = descriptionPool.filter(d => !localCluster.transactionIds.includes(d.id));
+        console.log(`[Cluster Tool] Remaining: ${descriptionPool.length}`);
+        clusters.push(localCluster);
     }
 
-    // fs.writeFile("./extracted_maps.json", JSON.stringify(testMap), 'utf8', (err) => {
-    //     if (err) {
-    //         console.error('Error writing to file', err);
-    //     } else {
-    //         console.log(`Data written to ./extracted_maps.json as JSON.`);
-    //     }
-    // });
-
-    const BATCH_SIZE = 5;
-
-    for (let i = 0; i < clusters.length; i += BATCH_SIZE) {
-        const batch = clusters.slice(i, i + BATCH_SIZE);
-
-        console.log(`Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(clusters.length / BATCH_SIZE)} — ${batch.length} clusters`);
-
-
-        await Promise.all(batch.map(async (cluster) => {
-            return prisma.cluster.create({
+    for (let i = 0; i < clusters.length; i += CLUSTER_BATCH_SIZE) {
+        const batch = clusters.slice(i, i + CLUSTER_BATCH_SIZE);
+        console.log(`[Cluster Tool] Saving batch ${Math.floor(i / CLUSTER_BATCH_SIZE) + 1}/${Math.ceil(clusters.length / CLUSTER_BATCH_SIZE)}`);
+        await Promise.all(batch.map(cluster =>
+            prisma.cluster.create({
                 data: {
-                    transactions: {
-                        connect: cluster.transactionIds.map(c => ({ id: c }))
-                    },
+                    transactions: { connect: cluster.transactionIds.map(id => ({ id })) },
                     clusterLength: cluster.transactionIds.length,
+                    bankName,
                     centroid: cluster.centroid,
                     merchantName: null,
                     category: null,
                     confidence: null,
-                    categorySupportRationale: null
-                }
-            });
-        }));
+                    categorySupportRationale: null,
+                },
+            })
+        ));
+    }
+};
 
+// ── Incremental clustering for subsequent uploads of same bank (0.6 threshold) ─
+const performIncrementalClustering = async (newTransactions: TxnVector[], bankName: string) => {
+    if (!process.env.TRAN_VECTOR_INDEX_NAME) throw new Error("TRAN_VECTOR_INDEX_NAME env var is not set");
+
+    // Build pool from existing clusters of this bank
+    const existingClusterIds = (await prisma.cluster.findMany({
+        where: { bankName },
+        select: { id: true },
+    })).map(c => c.id);
+
+    const existingTxns = await prisma.finalTransactionData.findMany({
+        where: { clusterId: { in: existingClusterIds } },
+        select: { id: true, clusterId: true },
+    });
+
+    const txnToCluster = new Map(existingTxns.map(t => [t.id, t.clusterId!]));
+    const poolIds = existingTxns.map(t => ({ '$oid': t.id }));
+    const numCandidates = Math.min(10000, Math.max(150, poolIds.length * 10));
+
+    console.log(`[Cluster Tool] Incremental mode — ${newTransactions.length} new, ${poolIds.length} in pool`);
+
+    const clusterIncrements = new Map<string, number>();
+    const singletons: TxnVector[] = [];
+
+    for (const txn of newTransactions) {
+        if (poolIds.length === 0) {
+            singletons.push(txn);
+            continue;
+        }
+
+        let results: { _id: { '$oid': string }; similarity: number }[] = [];
+        while (true) {
+            results = await prisma.finalTransactionData.aggregateRaw({
+                pipeline: [
+                    { '$vectorSearch': { 'index': process.env.TRAN_VECTOR_INDEX_NAME, 'path': 'descriptionVector', 'queryVector': txn.descriptionVector, 'numCandidates': numCandidates, 'limit': numCandidates } },
+                    { '$match': { '_id': { '$in': poolIds } } },
+                    { '$project': { '_id': 1, 'similarity': { '$meta': 'vectorSearchScore' } } },
+                    { '$limit': 1 },
+                ],
+            }) as unknown as { _id: { '$oid': string }; similarity: number }[];
+
+            if (results.length > 0) break;
+            await new Promise(res => setTimeout(res, 2000));
+        }
+
+        const best = results[0];
+        if (best && best.similarity >= 0.9) {
+            const clusterId = txnToCluster.get(best._id['$oid']);
+            if (clusterId) {
+                await prisma.finalTransactionData.update({ where: { id: txn.id }, data: { clusterId } });
+                clusterIncrements.set(clusterId, (clusterIncrements.get(clusterId) ?? 0) + 1);
+                continue;
+            }
+        }
+        singletons.push(txn);
     }
 
+    // Update clusterLength for matched clusters
+    await Promise.all(
+        [...clusterIncrements.entries()].map(([clusterId, count]) =>
+            prisma.cluster.update({ where: { id: clusterId }, data: { clusterLength: { increment: count } } })
+        )
+    );
 
+    // Create singleton clusters for unmatched transactions
+    for (let i = 0; i < singletons.length; i += CLUSTER_BATCH_SIZE) {
+        const batch = singletons.slice(i, i + CLUSTER_BATCH_SIZE);
+        await Promise.all(batch.map(txn =>
+            prisma.cluster.create({
+                data: {
+                    transactions: { connect: [{ id: txn.id }] },
+                    clusterLength: 1,
+                    bankName,
+                    centroid: txn.description,
+                    merchantName: null,
+                    category: null,
+                    confidence: null,
+                    categorySupportRationale: null,
+                },
+            })
+        ));
+    }
 
-}
+    console.log(`[Cluster Tool] Done — ${newTransactions.length - singletons.length} assigned to existing clusters, ${singletons.length} new singletons`);
+};
 
-
-
+// ── Tool ──────────────────────────────────────────────────────────────────────
 const clusterGeneratorTool = tool(async (input) => {
     const { statementMetadataId } = input;
+    if (!statementMetadataId) throw new Error("statementMetadataId is required for cluster generation.");
+
+    const metadata = await prisma.statementMetadata.findUnique({
+        where: { id: statementMetadataId },
+        select: { bankName: true },
+    });
+    if (!metadata) throw new Error(`StatementMetadata not found for id: ${statementMetadataId}`);
+    const { bankName } = metadata;
 
     const normalizedTransactions = await prisma.normalizedTransactions.findMany({
-        where: { statementMetadataId: statementMetadataId ?? null },
+        where: { statementMetadataId },
         select: { description: true, date: true, creditAmount: true, debitAmount: true, balance: true },
     });
     if (normalizedTransactions.length === 0) {
@@ -167,14 +219,25 @@ const clusterGeneratorTool = tool(async (input) => {
             balance: t.balance,
             description: descriptionCleaner(t.description),
             descriptionVector: descriptionEmbeddings[index] || [],
-            statementMetadataId: statementMetadataId ?? null,
+            statementMetadataId,
         })),
     });
 
-    const transIds = await prisma.finalTransactionData.findMany({ select: { id: true, description: true, descriptionVector: true } });
-    console.log(`[Cluster Tool] Saved ${normalizedTransactions.length} transactions — fetched ${transIds.length} total from DB for clustering`);
+    const newTxns = await prisma.finalTransactionData.findMany({
+        where: { statementMetadataId },
+        select: { id: true, description: true, descriptionVector: true },
+    });
+    console.log(`[Cluster Tool] ${newTxns.length} transactions ready for clustering`);
 
-    await performDescriptionClustering(transIds).catch(console.error);
+    const existingClusterCount = await prisma.cluster.count({ where: { bankName } });
+
+    if (existingClusterCount > 0) {
+        console.log(`[Cluster Tool] Existing clusters found for bank "${bankName}" — incremental mode`);
+        await performIncrementalClustering(newTxns, bankName).catch(console.error);
+    } else {
+        console.log(`[Cluster Tool] No existing clusters for bank "${bankName}" — fresh clustering`);
+        await performDescriptionClustering(newTxns, bankName).catch(console.error);
+    }
 
     return "ok";
 },
@@ -183,8 +246,8 @@ const clusterGeneratorTool = tool(async (input) => {
         description: `Embeds transaction descriptions, saves to FinalTransactionData, and clusters by similarity. Reads from NormalizedTransactions by statementMetadataId.`,
         schema: z.object({
             statementMetadataId: z.string().optional().describe("ID of the StatementMetadata record for this upload"),
-        })
+        }),
     }
-)
+);
 
-export { clusterGeneratorTool }
+export { clusterGeneratorTool };
