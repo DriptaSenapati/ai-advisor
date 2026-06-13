@@ -15,16 +15,22 @@ type VectorSearchResult = {
 };
 
 type SingletonResult =
-    | { id: string; matched: true; category: string; confidence: number; categorySupportRationale: string }
+    | { id: string; matched: true; merchantName: string | null; category: string; confidence: number; categorySupportRationale: string }
     | { id: string; matched: false };
 
 const llmCategoryNode: GraphNode<typeof agentGraphSchema> = async (state) => {
+    const metadata = await prisma.statementMetadata.findUnique({
+        where: { id: state.statementMetadataId! },
+        select: { bankName: true }
+    });
+    const bankName = metadata?.bankName;
+
     let retryAttempt = 0;
     const maxRetryAttempt = 3;
 
     while (true) {
         var clusters = await prisma.cluster.findMany({
-            where: { category: null },
+            where: { category: null, ...(bankName ? { bankName } : {}) },
             select: { id: true, clusterLength: true, centroid: true }
         });
         if (clusters.length > 0) {
@@ -45,7 +51,7 @@ const llmCategoryNode: GraphNode<typeof agentGraphSchema> = async (state) => {
 
     console.log(`Clusters to categorize: ${clusters.length} total, ${singletons.length} singletons, ${multiClusters.length} multi-transaction`);
 
-    // Multi-clusters are processed first so singletons can inherit from their categories
+    // Multi-clusters processed first so singletons can inherit from their categories
     for (let i = 0; i < multiClusters.length; i += BATCH_SIZE) {
         const batch = multiClusters.slice(i, i + BATCH_SIZE);
         const batchNum = Math.floor(i / BATCH_SIZE) + 1;
@@ -87,6 +93,29 @@ const llmCategoryNode: GraphNode<typeof agentGraphSchema> = async (state) => {
 
     const singletonClusterIds = singletons.map(c => c.id);
 
+    // Build bank-scoped pool for singleton matching
+    // Singletons search within same bank's already-categorized clusters only
+    let bankPoolIds: { '$oid': string }[] = [];
+
+    if (bankName) {
+        const eligibleClusterIds = (await prisma.cluster.findMany({
+            where: {
+                bankName,
+                id: { notIn: singletonClusterIds },
+                category: { not: null }
+            },
+            select: { id: true }
+        })).map(c => c.id);
+
+        const poolTxns = await prisma.finalTransactionData.findMany({
+            where: { clusterId: { in: eligibleClusterIds } },
+            select: { id: true }
+        });
+
+        bankPoolIds = poolTxns.map(t => ({ '$oid': t.id }));
+        console.log(`[LLM Category] Singleton pool: ${bankPoolIds.length} transactions from bank "${bankName}"`);
+    }
+
     const singletonResults: SingletonResult[] = await Promise.all(
         singletons.map(async (singleton): Promise<SingletonResult> => {
             const singletonTx = await prisma.finalTransactionData.findFirst({
@@ -94,9 +123,11 @@ const llmCategoryNode: GraphNode<typeof agentGraphSchema> = async (state) => {
                 select: { id: true, descriptionVector: true }
             });
 
-            if (!singletonTx || !singletonTx.descriptionVector.length) {
+            if (!singletonTx || !singletonTx.descriptionVector.length || bankPoolIds.length === 0) {
                 return { id: singleton.id, matched: false };
             }
+
+            const numCandidates = Math.min(10000, Math.max(150, bankPoolIds.length * 10));
 
             const rawResults = await prisma.finalTransactionData.aggregateRaw({
                 pipeline: [
@@ -105,25 +136,23 @@ const llmCategoryNode: GraphNode<typeof agentGraphSchema> = async (state) => {
                             'index': process.env.TRAN_VECTOR_INDEX_NAME,
                             'path': 'descriptionVector',
                             'queryVector': singletonTx.descriptionVector,
-                            'numCandidates': 150,
-                            'limit': 30
+                            'numCandidates': numCandidates,
+                            'limit': numCandidates
                         }
                     },
+                    { '$match': { '_id': { '$in': bankPoolIds } } },
                     {
                         '$project': {
                             '_id': 1,
                             'clusterId': 1,
                             'similarity': { '$meta': 'vectorSearchScore' }
                         }
-                    }
+                    },
+                    { '$limit': 1 }
                 ]
             }) as unknown as VectorSearchResult[];
 
-            const topMatch = rawResults.find(r =>
-                r._id['$oid'] !== singletonTx.id &&
-                r.clusterId != null &&
-                !singletonClusterIds.includes(r.clusterId['$oid'])
-            );
+            const topMatch = rawResults[0];
 
             if (!topMatch || topMatch.similarity < SINGLETON_SIMILARITY_THRESHOLD) {
                 return { id: singleton.id, matched: false };
@@ -131,7 +160,7 @@ const llmCategoryNode: GraphNode<typeof agentGraphSchema> = async (state) => {
 
             const matchedCluster = await prisma.cluster.findUnique({
                 where: { id: topMatch.clusterId!['$oid'] },
-                select: { category: true, confidence: true }
+                select: { merchantName: true, category: true, confidence: true }
             });
 
             if (!matchedCluster?.category) {
@@ -141,6 +170,7 @@ const llmCategoryNode: GraphNode<typeof agentGraphSchema> = async (state) => {
             return {
                 id: singleton.id,
                 matched: true,
+                merchantName: matchedCluster.merchantName ?? null,
                 category: matchedCluster.category,
                 confidence: (matchedCluster.confidence ?? 0) * SINGLETON_CONFIDENCE_PENALTY,
                 categorySupportRationale: `Inferred from nearest cluster (similarity: ${topMatch.similarity.toFixed(2)})`
@@ -157,7 +187,7 @@ const llmCategoryNode: GraphNode<typeof agentGraphSchema> = async (state) => {
                 prisma.cluster.update({
                     where: { id: r.id },
                     data: {
-                        merchantName: null,
+                        merchantName: r.merchantName,
                         category: r.category,
                         confidence: r.confidence,
                         categorySupportRationale: r.categorySupportRationale
@@ -165,7 +195,7 @@ const llmCategoryNode: GraphNode<typeof agentGraphSchema> = async (state) => {
                 })
             )
         );
-        console.log(`Inferred category for ${matched.length} singleton clusters from nearest neighbor`);
+        console.log(`[LLM Category] Inferred category for ${matched.length} singleton(s) from nearest neighbor`);
     }
 
     if (unmatched.length > 0) {
@@ -177,7 +207,14 @@ const llmCategoryNode: GraphNode<typeof agentGraphSchema> = async (state) => {
                 categorySupportRationale: "Singleton cluster — no similar cluster found"
             }
         });
-        console.log(`Marked ${unmatched.length} singleton clusters as Uncategorized`);
+        console.log(`[LLM Category] Marked ${unmatched.length} singleton(s) as Uncategorized`);
+    }
+
+    if (state.statementMetadataId) {
+        await prisma.statementMetadata.update({
+            where: { id: state.statementMetadataId },
+            data: { categorizationStatus: "Completed" },
+        });
     }
 
     return state;

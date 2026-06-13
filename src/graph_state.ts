@@ -9,6 +9,7 @@ const agentGraphSchema = new StateSchema({
     bankName: z.string(),
     statementMetadataId: z.string().optional(),
     isImageBased: z.boolean().default(false),
+    overlapOverride: z.boolean().default(false),
     transactionData: z.array(genericTransactionDataSchema.extend({
         [process.env.TEMP_ID_KEY || "tempId"]: z.string(),
     })).optional(),

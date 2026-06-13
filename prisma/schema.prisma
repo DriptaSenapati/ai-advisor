@@ -165,7 +165,8 @@ model StatementMetadata {
   totalTransactions      Int?
   exceptionCount         Int?
   normalizerStatus       String                   @default("Processing") // "Processing" | "Completed" | "Error"
-  insightsStatus         String                   @default("Processing") // "Processing" | "Completed" | "Error"
+  categorizationStatus   String                   @default("Not Started") // "Not Started" | "Processing" | "Completed" | "Error"
+  insightsStatus         String                   @default("Not Started") // "Not Started" | "Processing" | "Completed" | "Error"
   normalizerError        String?
   insightsError          String?
   transactions           FinalTransactionData[]

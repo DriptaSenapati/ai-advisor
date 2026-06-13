@@ -9,6 +9,7 @@ const statementExceptionFinalToolNode: GraphNode<typeof agentGraphSchema> = asyn
     const { exceptions, normTransactions } = await statementExceptionFinalTool.invoke({
         correctedData,
         statementMetadataId: state.statementMetadataId,
+        overlapOverride: state.overlapOverride ?? false,
     });
     console.log(`[Exception Handler] Done — ${normTransactions.length} valid → NormalizedTransactions, ${exceptions.length} invalid → ExceptionTransactions`);
     return { transactionData: undefined };

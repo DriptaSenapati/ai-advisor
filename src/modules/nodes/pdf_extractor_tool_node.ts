@@ -113,7 +113,7 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
     }
 
     const metadata = await prisma.statementMetadata.create({
-        data: { bankName: state.bankName || "Unknown Bank", contentHash, normalizerStatus: "Processing", insightsStatus: "Processing" },
+        data: { bankName: state.bankName || "Unknown Bank", contentHash, normalizerStatus: "Processing", insightsStatus: "Not Started" },
     });
     console.log(`[PDF Extractor] StatementMetadata created (id: ${metadata.id})`);
 

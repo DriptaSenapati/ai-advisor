@@ -164,26 +164,13 @@ const performIncrementalClustering = async (newTransactions: TxnVector[], bankNa
         )
     );
 
-    // Create singleton clusters for unmatched transactions
-    for (let i = 0; i < singletons.length; i += CLUSTER_BATCH_SIZE) {
-        const batch = singletons.slice(i, i + CLUSTER_BATCH_SIZE);
-        await Promise.all(batch.map(txn =>
-            prisma.cluster.create({
-                data: {
-                    transactions: { connect: [{ id: txn.id }] },
-                    clusterLength: 1,
-                    bankName,
-                    centroid: txn.description,
-                    merchantName: null,
-                    category: null,
-                    confidence: null,
-                    categorySupportRationale: null,
-                },
-            })
-        ));
+    // Unmatched transactions: cluster among themselves — may form new multi-clusters or singletons
+    if (singletons.length > 0) {
+        console.log(`[Cluster Tool] ${singletons.length} unmatched — running fresh clustering among themselves...`);
+        await performDescriptionClustering(singletons, bankName);
     }
 
-    console.log(`[Cluster Tool] Done — ${newTransactions.length - singletons.length} assigned to existing clusters, ${singletons.length} new singletons`);
+    console.log(`[Cluster Tool] Done — ${newTransactions.length - singletons.length} assigned to existing clusters, ${singletons.length} went to fresh clustering`);
 };
 
 // ── Tool ──────────────────────────────────────────────────────────────────────
@@ -239,7 +226,7 @@ const clusterGeneratorTool = tool(async (input) => {
         await performDescriptionClustering(newTxns, bankName).catch(console.error);
     }
 
-    return "ok";
+    return true;
 },
     {
         name: "category-generator-tool",

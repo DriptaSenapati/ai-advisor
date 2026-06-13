@@ -21,7 +21,7 @@
 import "../envConfig.js";
 
 const CHECKPOINT_DB = "./dev-checkpoints.sqlite";
-const PDF_PATH = "assets\\2025_statement.pdf";
+const PDF_PATH = "assets\\2026_statement.pdf";
 
 // ── shared arg parsing ────────────────────────────────────────────────────────
 
@@ -106,7 +106,13 @@ type InsightsStage = typeof INSIGHTS_VALID_STAGES[number];
 
 async function runInsights() {
     const monthsArg = process.argv.find(a => a.startsWith("--months="))?.split("=")[1];
+    const metadataIdArg = process.argv.find(a => a.startsWith("--metadataId="))?.split("=")[1];
     const fromStage = fromArg as InsightsStage | undefined;
+
+    if (!metadataIdArg) {
+        console.error("--metadataId=<id> is required for insights run. Find the StatementMetadata ID from the DB.");
+        process.exit(1);
+    }
 
     // isFirstRun when no --months flag is provided — processes all available data
     const isFirstRun = !monthsArg;
@@ -126,8 +132,8 @@ async function runInsights() {
 
     if (!fromStage) {
         const label = isFirstRun ? "all available data" : `last ${months} months`;
-        console.log(`[insights] Full run — ${label}...`);
-        await agent.invoke({ monthToBeCovered: months, messages: [], isFirstRun }, threadConfig);
+        console.log(`[insights] Full run — ${label} — metadataId=${metadataIdArg}...`);
+        await agent.invoke({ monthToBeCovered: months, messages: [], isFirstRun, statementMetadataId: metadataIdArg }, threadConfig);
         return;
     }
 
@@ -142,13 +148,13 @@ async function runInsights() {
     }
 
     if (!resumeCheckpointId) {
-        console.error(`No checkpoint found before "${targetNode}".\nRun the full insights pipeline first: npm run dev:checkpoint -- --graph=insights`);
+        console.error(`No checkpoint found before "${targetNode}".\nRun the full insights pipeline first: npm run dev:checkpoint -- --graph=insights --metadataId=<id>`);
         process.exit(1);
     }
 
     console.log(`[insights:${fromStage}] Resuming from checkpoint before "${targetNode}"...`);
     await agent.invoke(
-        { monthToBeCovered: months, messages: [], isFirstRun },
+        { monthToBeCovered: months, messages: [], isFirstRun, statementMetadataId: metadataIdArg },
         { configurable: { thread_id: INSIGHTS_THREAD_ID, checkpoint_id: resumeCheckpointId } }
     );
 }

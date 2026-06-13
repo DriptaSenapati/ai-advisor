@@ -30,12 +30,12 @@ const creditDebitValidator = (row: { creditAmount: string; debitAmount: string }
 
 
 const statementExceptionFinalTool = tool(async (input) => {
-    const { correctedData, statementMetadataId } = input;
+    const { correctedData, statementMetadataId, overlapOverride } = input;
     if (!correctedData) {
         throw new Error("correctedData is required.");
     }
-    let exceptions = [];
-    let normTransactions = [];
+    let exceptions: any[] = [];
+    let normTransactions: any[] = [];
     for (const row of correctedData) {
         if (!creditDebitValidator({ creditAmount: row.creditAmount || "", debitAmount: row.debitAmount || "" }) || !parseDate(row.date || "") || !parseAmount(row.balance || "")) {
             exceptions.push(row);
@@ -100,6 +100,50 @@ const statementExceptionFinalTool = tool(async (input) => {
             console.log("[Exception Handler] Statement dates already set from LLM extraction — skipping date range computation");
         }
 
+        // Overlap detection — check against existing same-bank statements
+        if (periodStart && periodEnd) {
+            const metadata = await prisma.statementMetadata.findUnique({
+                where: { id: statementMetadataId },
+                select: { bankName: true },
+            });
+
+            if (metadata?.bankName) {
+                const conflicting = await prisma.statementMetadata.findMany({
+                    where: {
+                        id: { not: statementMetadataId },
+                        bankName: metadata.bankName,
+                        statementPeriodStart: { lte: periodEnd },
+                        statementPeriodEnd: { gte: periodStart },
+                    },
+                    select: { id: true, statementPeriodStart: true, statementPeriodEnd: true },
+                });
+
+                if (conflicting.length > 0) {
+                    if (overlapOverride) {
+                        throw new Error(
+                            `Overlap detected with existing statement(s) [${conflicting.map(c => c.id).join(", ")}] for bank "${metadata.bankName}". ` +
+                            `Overriding historical transactions is not allowed.`
+                        );
+                    }
+
+                    // Discard overlapping rows from the new upload
+                    const originalCount = normTransactions.length;
+                    normTransactions = normTransactions.filter(row => {
+                        const date = parseTransactionDate(row.date || "");
+                        if (!date) return true;
+                        return !conflicting.some(c =>
+                            c.statementPeriodStart && c.statementPeriodEnd &&
+                            date >= c.statementPeriodStart && date <= c.statementPeriodEnd
+                        );
+                    });
+                    const discarded = originalCount - normTransactions.length;
+                    if (discarded > 0) {
+                        console.warn(`[Exception Handler] Overlap with existing ${metadata.bankName} statement(s) — discarded ${discarded} transaction(s) from new upload`);
+                    }
+                }
+            }
+        }
+
         await prisma.statementMetadata.update({
             where: { id: statementMetadataId },
             data: {
@@ -131,6 +175,7 @@ const statementExceptionFinalTool = tool(async (input) => {
                 [process.env.TEMP_ID_KEY || "tempId"]: z.string().describe("Temporary ID to identify the row with error in the original extracted data"),
             })),
             statementMetadataId: z.string().optional().describe("ID of the StatementMetadata record for this upload"),
+            overlapOverride: z.boolean().default(false).describe("If true, throws an error when date overlap with existing statements is detected"),
         })
     });
 
