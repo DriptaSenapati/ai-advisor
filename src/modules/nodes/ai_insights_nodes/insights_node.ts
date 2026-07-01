@@ -44,18 +44,7 @@ const fmt = (n: number) => n.toFixed(0);
 const fmtPct = (n: number) => n.toFixed(1);
 
 const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) => {
-    const { isFirstRun, monthToBeCovered } = state;
-
-    let monthlyStats;
-
-    if (isFirstRun) {
-        monthlyStats = await prisma.monthlyStats.findMany({ orderBy: { month: "asc" } });
-    } else {
-        monthlyStats = (await prisma.monthlyStats.findMany({
-            orderBy: { month: "desc" },
-            take: monthToBeCovered,
-        })).reverse();
-    }
+    const monthlyStats = await prisma.monthlyStats.findMany({ orderBy: { month: "asc" } });
 
     if (monthlyStats.length === 0) {
         console.log("No MonthlyStats found, skipping insights generation.");

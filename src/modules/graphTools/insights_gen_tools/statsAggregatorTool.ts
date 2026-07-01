@@ -2,22 +2,18 @@ import { tool } from "langchain";
 import z from "zod";
 import prisma from "../../../prismaClient.js";
 
-function getLastNMonths(n: number): string[] {
-    const months: string[] = [];
-    const now = new Date();
-    for (let i = n - 1; i >= 0; i--) {
-        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-        months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
-    }
-    return months;
-}
-
 function getMonthBounds(month: string) {
     const [year, mon] = month.split("-").map(Number);
     return {
         start: new Date(year!, mon! - 1, 1),
         end: new Date(year!, mon!, 1),
     };
+}
+
+function nextMonth(month: string): string {
+    const [y, m] = month.split("-").map(Number);
+    const d = new Date(y!, m!, 1); // m is 1-indexed, so new Date(y, m, 1) = first of next month
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
 type AggregationResult = [{
@@ -29,37 +25,20 @@ type AggregationResult = [{
     timeOfMonth: { _id: string; totalSpend: number; txnCount: number }[];
 }];
 
-const statsAggregatorTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
-    let months: string[];
+const statsAggregatorTool = tool(async ({ affectedMonths }) => {
+    if (affectedMonths.length === 0) return "No months to process.";
 
-    if (isFirstRun) {
-        console.log("Starting first run of statsAggregatorTool for all available data...");
+    const sorted = [...affectedMonths].sort();
 
-        const distinctMonths = await prisma.finalTransactionData.aggregateRaw({
-            pipeline: [
-                {
-                    $group: {
-                        _id: { year: { $year: "$date" }, month: { $month: "$date" } },
-                    },
-                },
-                { $sort: { "_id.year": 1, "_id.month": 1 } },
-            ],
-        }) as unknown as { _id: { year: number; month: number } }[];
+    // Cascade: recompute the month immediately after the last affected month
+    // so its momDelta references up-to-date data
+    const cascade = nextMonth(sorted[sorted.length - 1]!);
+    const cascadeExists = await prisma.monthlyStats.findFirst({ where: { month: cascade } });
+    const monthsToProcess = cascadeExists ? [...sorted, cascade] : sorted;
 
-        if (distinctMonths.length === 0) {
-            console.log("No transactions found in the database.");
-            return "No transactions to process.";
-        }
+    console.log(`[Stats Aggregator] Processing: ${monthsToProcess.join(", ")}${cascadeExists ? ` (cascade: ${cascade})` : ""}`);
 
-        months = distinctMonths.map(({ _id }) =>
-            `${_id.year}-${String(_id.month).padStart(2, "0")}`
-        );
-        console.log(`First run: processing ${months.length} months — ${months[0]} to ${months[months.length - 1]}`);
-    } else {
-        months = getLastNMonths(monthToBeCovered!);
-    }
-
-    for (const month of months) {
+    for (const month of monthsToProcess) {
         const { start, end } = getMonthBounds(month);
 
         const result = await prisma.finalTransactionData.aggregateRaw({
@@ -199,7 +178,7 @@ const statsAggregatorTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
 
         const raw = result[0];
         if (!raw || raw.totals.length === 0) {
-            console.log(`No transactions found for ${month}, skipping.`);
+            console.log(`[Stats Aggregator] No transactions for ${month}, skipping.`);
             continue;
         }
 
@@ -240,7 +219,6 @@ const statsAggregatorTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
             week4: tomMap["week4"] ?? { totalSpend: 0, txnCount: 0 },
         };
 
-        // Month strings are "YYYY-MM" so lexicographic < is equivalent to chronological <
         const historicalStats = await prisma.monthlyStats.findMany({
             where: { month: { lt: month } },
             orderBy: { month: "desc" },
@@ -261,7 +239,6 @@ const statsAggregatorTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
             const rollingAvg6m = rollingWindow.reduce((a, b) => a + b, 0) / rollingWindow.length;
             const isSpiked = cat.totalSpend > rollingAvg6m * 2;
 
-            // need at least 3 data points; fall back to current value to avoid false trend signals
             const last3 = [
                 cat.totalSpend,
                 historical[0] ?? cat.totalSpend,
@@ -296,18 +273,15 @@ const statsAggregatorTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
             await prisma.monthlyStats.create({ data: { month, ...statsData } });
         }
 
-        console.log(`MonthlyStats upserted for ${month}`);
+        console.log(`[Stats Aggregator] Upserted MonthlyStats for ${month}`);
     }
 
-    return `MonthlyStats computed and upserted for: ${months.join(", ")}`;
+    return `MonthlyStats computed for: ${monthsToProcess.join(", ")}`;
 }, {
     name: "statsAggregatorTool",
-    description: `Tool to aggregate the transaction data on monthly basis to generate insights.
-                    It takes in the transaction data and the number of months for which the insights
-                    needs to be generated as input and returns the aggregated stats for those months as output.`,
+    description: "Recomputes MonthlyStats for the given affected months plus the immediately following month (momDelta cascade).",
     schema: z.object({
-        monthToBeCovered: z.int().min(2).max(12).optional(),
-        isFirstRun: z.boolean(),
+        affectedMonths: z.array(z.string()).describe("List of YYYY-MM months to recompute"),
     }),
 });
 

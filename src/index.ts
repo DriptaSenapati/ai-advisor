@@ -16,7 +16,6 @@ transactionCategoryAgent.invoke({
 
     setTimeout(() => {
         insightsAgent.invoke({
-            isFirstRun: true,
             statementMetadataId: advisorResult.statementMetadataId,
         }).then(() => {
             console.log("Insights Agent ran successfully");

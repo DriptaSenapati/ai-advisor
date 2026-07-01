@@ -2,18 +2,20 @@
  * Dev runner using LangGraph's built-in checkpointing.
  * State is saved after every node automatically — no custom cache files.
  *
- * ── Advisor graph (default) ─────────────────────────────────────────────────
- *   npm run dev:checkpoint                            # full run from PDF
- *   npm run dev:checkpoint -- --from=normalize        # re-run from normalization onwards
- *   npm run dev:checkpoint -- --from=balance          # re-run from balance gap + confidence onwards
- *   npm run dev:checkpoint -- --from=categorize       # re-run from clustering + LLM onwards
- *   npm run dev:checkpoint -- --from=llm              # re-run only LLM categorization
+ * ── Full dry run (default — no --graph flag) ────────────────────────────────
+ *   npm run dev:checkpoint                            # PDF → normalize → categorize → insights (chained)
  *
- * ── Insights graph ───────────────────────────────────────────────────────────
- *   npm run dev:checkpoint -- --graph=insights                    # first run — all available data
- *   npm run dev:checkpoint -- --graph=insights --months=3         # last 3 months only
- *   npm run dev:checkpoint -- --graph=insights --from=recurring   # resume from recurring node
- *   npm run dev:checkpoint -- --graph=insights --from=insights    # resume from insights LLM node
+ * ── Advisor graph only ───────────────────────────────────────────────────────
+ *   npm run dev:checkpoint -- --graph=advisor                     # PDF → normalize → categorize (no insights)
+ *   npm run dev:checkpoint -- --graph=advisor --from=normalize    # re-run from normalization onwards
+ *   npm run dev:checkpoint -- --graph=advisor --from=balance      # re-run from balance gap + confidence onwards
+ *   npm run dev:checkpoint -- --graph=advisor --from=categorize   # re-run from clustering + LLM onwards
+ *   npm run dev:checkpoint -- --graph=advisor --from=llm          # re-run only LLM categorization
+ *
+ * ── Insights graph only ──────────────────────────────────────────────────────
+ *   npm run dev:checkpoint -- --graph=insights --metadataId=<id>                    # run insights for statement
+ *   npm run dev:checkpoint -- --graph=insights --metadataId=<id> --from=recurring   # resume from recurring node
+ *   npm run dev:checkpoint -- --graph=insights --metadataId=<id> --from=insights    # resume from insights LLM node
  *
  * Pair with reset:db to clear the relevant DB collections first.
  */
@@ -21,11 +23,11 @@
 import "../envConfig.js";
 
 const CHECKPOINT_DB = "./dev-checkpoints.sqlite";
-const PDF_PATH = "assets\\2026_statement.pdf";
+const PDF_PATH = "assets\\hsbc_statement.pdf";
 
 // ── shared arg parsing ────────────────────────────────────────────────────────
 
-const graphMode = process.argv.find(a => a.startsWith("--graph="))?.split("=")[1] ?? "advisor";
+const graphMode = process.argv.find(a => a.startsWith("--graph="))?.split("=")[1] ?? "full";
 const fromArg = process.argv.find(a => a.startsWith("--from="))?.split("=")[1];
 
 // ── advisor graph ─────────────────────────────────────────────────────────────
@@ -65,7 +67,7 @@ async function runAdvisor() {
     const threadConfig = { configurable: { thread_id: ADVISOR_THREAD_ID } };
 
     if (fromStage === "pdf") {
-        console.log("[pdf] Full advisor run...");
+        console.log("[advisor] Full advisor run...");
         await agent.invoke({ statementPath: PDF_PATH, messages: [] }, threadConfig);
         return;
     }
@@ -105,7 +107,6 @@ const INSIGHTS_VALID_STAGES = ["stats", "recurring", "insights"] as const;
 type InsightsStage = typeof INSIGHTS_VALID_STAGES[number];
 
 async function runInsights() {
-    const monthsArg = process.argv.find(a => a.startsWith("--months="))?.split("=")[1];
     const metadataIdArg = process.argv.find(a => a.startsWith("--metadataId="))?.split("=")[1];
     const fromStage = fromArg as InsightsStage | undefined;
 
@@ -113,10 +114,6 @@ async function runInsights() {
         console.error("--metadataId=<id> is required for insights run. Find the StatementMetadata ID from the DB.");
         process.exit(1);
     }
-
-    // isFirstRun when no --months flag is provided — processes all available data
-    const isFirstRun = !monthsArg;
-    const months = isFirstRun ? 12 : Math.min(12, Math.max(2, parseInt(monthsArg!, 10)));
 
     if (fromStage && !INSIGHTS_VALID_STAGES.includes(fromStage)) {
         console.error(`Invalid --from for insights. Use one of: ${INSIGHTS_VALID_STAGES.join(", ")}`);
@@ -131,9 +128,8 @@ async function runInsights() {
     const threadConfig = { configurable: { thread_id: INSIGHTS_THREAD_ID } };
 
     if (!fromStage) {
-        const label = isFirstRun ? "all available data" : `last ${months} months`;
-        console.log(`[insights] Full run — ${label} — metadataId=${metadataIdArg}...`);
-        await agent.invoke({ monthToBeCovered: months, messages: [], isFirstRun, statementMetadataId: metadataIdArg }, threadConfig);
+        console.log(`[insights] Full run — metadataId=${metadataIdArg}...`);
+        await agent.invoke({ messages: [], statementMetadataId: metadataIdArg }, threadConfig);
         return;
     }
 
@@ -154,20 +150,52 @@ async function runInsights() {
 
     console.log(`[insights:${fromStage}] Resuming from checkpoint before "${targetNode}"...`);
     await agent.invoke(
-        { monthToBeCovered: months, messages: [], isFirstRun, statementMetadataId: metadataIdArg },
+        { messages: [], statementMetadataId: metadataIdArg },
         { configurable: { thread_id: INSIGHTS_THREAD_ID, checkpoint_id: resumeCheckpointId } }
     );
+}
+
+// ── full dry run ──────────────────────────────────────────────────────────────
+
+async function runFull() {
+    const { SqliteSaver } = await import("@langchain/langgraph-checkpoint-sqlite");
+    const { advisorAgentGraph, insightsAgentGraph } = await import("../graph.js");
+
+    const checkpointer = SqliteSaver.fromConnString(CHECKPOINT_DB);
+
+    console.log("[full] Running advisor graph...");
+    const advisorAgent = advisorAgentGraph.compile({ checkpointer });
+    const advisorResult = await advisorAgent.invoke(
+        { statementPath: PDF_PATH, messages: [] },
+        { configurable: { thread_id: ADVISOR_THREAD_ID } }
+    );
+
+    const statementMetadataId: string | undefined = advisorResult?.statementMetadataId;
+    if (!statementMetadataId) {
+        console.warn("[full] No statementMetadataId in advisor result — skipping insights.");
+        return;
+    }
+
+    console.log(`\n[full] Running insights graph for statementMetadataId=${statementMetadataId}...`);
+    const insightsAgent = insightsAgentGraph.compile({ checkpointer });
+    await insightsAgent.invoke(
+        { statementMetadataId, messages: [] },
+        { configurable: { thread_id: INSIGHTS_THREAD_ID } }
+    );
+    console.log("[full] Done.");
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
 
 async function run() {
-    if (graphMode === "insights") {
-        await runInsights();
+    if (graphMode === "full") {
+        await runFull();
     } else if (graphMode === "advisor") {
         await runAdvisor();
+    } else if (graphMode === "insights") {
+        await runInsights();
     } else {
-        console.error(`Unknown --graph value "${graphMode}". Use "advisor" or "insights".`);
+        console.error(`Unknown --graph value "${graphMode}". Use "advisor", "insights", or omit for full run.`);
         process.exit(1);
     }
 }

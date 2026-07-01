@@ -18,9 +18,8 @@ const agentGraphSchema = new StateSchema({
 
 const insightsAgentGraphSchema = new StateSchema({
     messages: MessagesValue,
-    isFirstRun: z.boolean().default(true).describe("Flag to indicate if it's the first run of the insights generation"),
-    monthToBeCovered: z.int().min(2).max(12).describe("Number of months for which the insights needs to be generated").default(12),
     statementMetadataId: z.string().optional(),
+    affectedMonths: z.array(z.string()).optional().describe("YYYY-MM months derived from the uploaded statement period"),
     rawStatsSnapshot: z.record(z.string(), z.unknown()).optional(),
     insightReports: z.record(z.string(), z.unknown()).optional()
 })

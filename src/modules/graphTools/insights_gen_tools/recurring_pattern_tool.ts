@@ -10,25 +10,6 @@ type RecurringCandidate = {
     category: string | null;
 };
 
-// Returns the longest consecutive month run (e.g. ["2025-01","2025-02","2025-03"] → 3)
-// function longestConsecutiveRun(months: string[]): number {
-//     const sorted = [...new Set(months)].sort();
-//     let best = 1;
-//     let current = 1;
-//     for (let i = 1; i < sorted.length; i++) {
-//         const [y1, m1] = sorted[i - 1]!.split("-").map(Number);
-//         const [y2, m2] = sorted[i]!.split("-").map(Number);
-//         const gap = (y2! - y1!) * 12 + (m2! - m1!);
-//         if (gap === 1) {
-//             current++;
-//             if (current > best) best = current;
-//         } else {
-//             current = 1;
-//         }
-//     }
-//     return best;
-// }
-
 function detectFrequency(months: string[], differenceInMonths: number): "monthly" | "quarterly" | "annually" | null {
     const sorted = [...new Set(months)].sort();
     const gaps: number[] = [];
@@ -40,12 +21,7 @@ function detectFrequency(months: string[], differenceInMonths: number): "monthly
     const avgGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
     if (avgGap <= 1.5) return "monthly";
     if (avgGap <= 3.5) return "quarterly";
-
-    if (avgGap > 10 && differenceInMonths >= 24) {
-        // Special case: if the average gap is around 12 months but all transactions happen in the same month across years, classify as annually
-        return "annually";
-    }
-
+    if (avgGap > 10 && differenceInMonths >= 24) return "annually";
     return null;
 }
 
@@ -56,41 +32,62 @@ function checkIsActive(months: string[], referenceDate: Date): boolean {
     return months.includes(current) || months.includes(prevMonth);
 }
 
-// Only subscriptions are cancellable — EMI, bills, investments are obligations
 function isCancellable(category: string | null): boolean {
     return category === "Entertainment & Subscriptions";
 }
 
-const recurringPatternTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
-    let windowStart: Date | null;
-    let differenceInMonths: number;
+const recurringPatternTool = tool(async ({ affectedMonths }) => {
+    if (affectedMonths.length === 0) return "No affected months.";
 
-    if (isFirstRun) {
-        windowStart = null;
-        console.log("Starting first run of recurringPatternTool for all available data...");
+    const sorted = [...affectedMonths].sort();
+    const firstMonth = sorted[0]!;
+    const lastMonth = sorted[sorted.length - 1]!;
 
-        const distinctMonths = await prisma.finalTransactionData.aggregateRaw({
-            pipeline: [
-                {
-                    $group: {
-                        _id: { year: { $year: "$date" }, month: { $month: "$date" } },
+    const [fy, fm] = firstMonth.split("-").map(Number);
+    const [ly, lm] = lastMonth.split("-").map(Number);
+    const rangeStart = new Date(fy!, fm! - 1, 1);
+    const rangeEnd = new Date(ly!, lm!, 1); // first day of month after lastMonth
+
+    // Find distinct merchant names that have transactions in the affected date range
+    const affectedResult = await prisma.finalTransactionData.aggregateRaw({
+        pipeline: [
+            {
+                $match: {
+                    debitAmount: { $gt: 0 },
+                    clusterId: { $exists: true, $ne: null },
+                    date: {
+                        $gte: { $date: { $numberLong: String(rangeStart.getTime()) } },
+                        $lt: { $date: { $numberLong: String(rangeEnd.getTime()) } },
                     },
                 },
-                { $sort: { "_id.year": 1, "_id.month": 1 } },
-            ],
-        }) as unknown as { _id: { year: number; month: number } }[];
+            },
+            { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
+            { $unwind: "$cluster" },
+            { $match: { "cluster.merchantName": { $ne: null } } },
+            { $group: { _id: "$cluster.merchantName" } },
+        ],
+    }) as unknown as { _id: string }[];
 
-        if (distinctMonths.length === 0) return "No transactions to process.";
-
-        const first = distinctMonths[0]!._id;
-        const last = distinctMonths[distinctMonths.length - 1]!._id;
-        differenceInMonths = (last.year - first.year) * 12 + (last.month - first.month);
-        console.log(`First run: data spans ${differenceInMonths} months`);
-    } else {
-        const now = new Date();
-        windowStart = new Date(now.getFullYear(), now.getMonth() - (monthToBeCovered! - 1), 1);
-        differenceInMonths = monthToBeCovered! - 1;
+    const merchantNames = affectedResult.map(m => m._id);
+    if (merchantNames.length === 0) {
+        console.log("[Recurring] No affected merchants in date range.");
+        return "No affected merchants.";
     }
+
+    console.log(`[Recurring] Re-evaluating ${merchantNames.length} merchant(s): ${merchantNames.join(", ")}`);
+
+    // Compute differenceInMonths from all available data (needed for frequency detection)
+    const distinctMonths = await prisma.finalTransactionData.aggregateRaw({
+        pipeline: [
+            { $group: { _id: { year: { $year: "$date" }, month: { $month: "$date" } } } },
+            { $sort: { "_id.year": 1, "_id.month": 1 } },
+        ],
+    }) as unknown as { _id: { year: number; month: number } }[];
+
+    const differenceInMonths = distinctMonths.length >= 2
+        ? (distinctMonths[distinctMonths.length - 1]!._id.year - distinctMonths[0]!._id.year) * 12 +
+          (distinctMonths[distinctMonths.length - 1]!._id.month - distinctMonths[0]!._id.month)
+        : 0;
 
     const maxDateResult = await prisma.finalTransactionData.aggregateRaw({
         pipeline: [{ $group: { _id: null, maxDate: { $max: "$date" } } }],
@@ -100,40 +97,23 @@ const recurringPatternTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
         ? new Date(maxDateResult[0].maxDate.$date)
         : new Date();
 
-
-    const dateMatchClause = windowStart
-        ? { date: { $gte: { $date: { $numberLong: String(windowStart.getTime()) } } } }
-        : {};
-
+    // Full cross-month aggregation — no date filter — but scoped to affected merchants only
     const candidates = await prisma.finalTransactionData.aggregateRaw({
         pipeline: [
-            // Only debit transactions belonging to a cluster
             {
                 $match: {
                     debitAmount: { $gt: 0 },
                     clusterId: { $exists: true, $ne: null },
-                    ...dateMatchClause,
                 },
             },
-            // Join Cluster early to get merchantName and category
-            {
-                $lookup: {
-                    from: "Cluster",
-                    localField: "clusterId",
-                    foreignField: "_id",
-                    as: "cluster",
-                },
-            },
+            { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
             { $unwind: "$cluster" },
-            // Exclude transfers, ATM, salary etc. that have no merchantName
-            { $match: { "cluster.merchantName": { $ne: null } } },
-            // Add month string per transaction
+            { $match: { "cluster.merchantName": { $in: merchantNames } } },
             {
                 $addFields: {
                     month: { $dateToString: { format: "%Y-%m", date: "$date" } },
                 },
             },
-            // Deduplicate: one entry per (merchantName, debitAmount, month)
             {
                 $group: {
                     _id: {
@@ -145,7 +125,6 @@ const recurringPatternTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
                     category: { $first: "$cluster.category" },
                 },
             },
-            // For each (merchantName, exact amount) pair — collect the months it appeared in
             {
                 $group: {
                     _id: {
@@ -158,7 +137,6 @@ const recurringPatternTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
                     category: { $first: "$category" },
                 },
             },
-            // Pre-filter: must appear in at least 3 months
             { $match: { monthCount: { $gte: 3 } } },
             {
                 $project: {
@@ -172,12 +150,9 @@ const recurringPatternTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
         ],
     }) as unknown as RecurringCandidate[];
 
-
-    // Filter in TypeScript: consecutive run should be monthly, quarterly, or annually with tight month range. This is because doing the consecutive check in Mongo is complex and we want to leverage TypeScript for flexibility in tweaking the algorithm.
-    const recurring = candidates.filter((c) => detectFrequency(c.months, differenceInMonths) !== null);
+    const recurring = candidates.filter(c => detectFrequency(c.months, differenceInMonths) !== null);
 
     let upserted = 0;
-
     for (const candidate of recurring) {
         const merchantName = candidate._id.merchantName;
         const estimatedMonthlyAmount = candidate._id.debitAmount;
@@ -195,16 +170,12 @@ const recurringPatternTool = tool(async ({ monthToBeCovered, isFirstRun }) => {
         upserted++;
     }
 
-    return `Recurring patterns upserted: ${upserted}`;
+    return `Recurring patterns upserted: ${upserted} for ${merchantNames.length} affected merchant(s)`;
 }, {
     name: "recurringPatternTool",
-    description: `Detects recurring payments from clustered transaction data.
-                  A payment is recurring if the exact same debitAmount for a cluster
-                  appears in 3+ consecutive months. Upserts RecurringPattern records
-                  and refreshes isActive flags on each run.`,
+    description: "Re-evaluates recurring payment patterns for merchants that have transactions in the affected months. Runs full cross-month aggregation for those merchants only.",
     schema: z.object({
-        monthToBeCovered: z.int().min(2).max(12).optional(),
-        isFirstRun: z.boolean(),
+        affectedMonths: z.array(z.string()).describe("YYYY-MM months whose transactions were affected by the new upload"),
     }),
 });
 
