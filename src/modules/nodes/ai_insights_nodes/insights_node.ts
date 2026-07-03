@@ -119,6 +119,18 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
         `${s.month}: ₹${fmt(s.totalRefunds)} across ${s.refundCount} transactions`
     ).join("\n");
 
+    const uncategorizedMonths: string[] = [];
+    for (const s of monthlyStats) {
+        const cats = s.categoryBreakdown as unknown as CategoryBreakdown[];
+        const uncategorized = cats.find(c => c.category === "Uncategorized");
+        if (uncategorized && uncategorized.shareOfTotal > 15) {
+            uncategorizedMonths.push(`${s.month} (${fmtPct(uncategorized.shareOfTotal)}%)`);
+        }
+    }
+    const dataQualityWarning: string | null = uncategorizedMonths.length > 0
+        ? `${uncategorizedMonths.length} month(s) have >15% uncategorized spend: ${uncategorizedMonths.join(", ")}. Insights for these months may be incomplete.`
+        : null;
+
     const rawStatsSnapshot = {
         tier,
         monthsCovered,
@@ -129,6 +141,7 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
         timeOfMonth,
         recurringPatterns,
         refunds,
+        dataQualityWarning,
     };
 
     console.log(`Generating Tier ${tier} insights for ${monthlyStats.length} months: ${monthsCovered.join(", ")}`);
@@ -144,6 +157,7 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
         timeOfMonth,
         recurringPatterns,
         refunds,
+        dataQualityWarning: dataQualityWarning ?? "None",
     });
 
     const insightReport = await insightsGenLlm.invoke(prompt);

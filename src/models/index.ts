@@ -65,6 +65,7 @@ const feedbackloopLLMSchema = z.object({
 const clusterCategorizationLLMSchema = z.object({
     clusterCategory: z.array(z.object({
         merchantName: z.string().nullable().describe("Canonical brand name (e.g. 'Zomato'). Null if no merchant is involved (P2P transfer, salary, EMI, ATM withdrawal, bank charge)."),
+        payeeName: z.string().nullable().describe("Person's name for P2P UPI/NEFT/IMPS transfers extracted from the description. Null for merchant transactions, salary, EMI, ATM, bank charges."),
         category: z.string().describe("Category from the predefined list."),
         confidence: z.number().describe("Confidence score between 0.0 and 1.0."),
         categorySupportRationale: z.string().describe("One short phrase explaining why this category was chosen.")
@@ -102,6 +103,12 @@ const insightsGenllmSchema = z.object({
         categoryCreep: z.string().nullable().describe("Categories growing slowly over 3+ months. Null for Tier 1 and Tier 2."),
         refundTracking: z.string().describe("Refunds received — total amount, count, and which categories they came from."),
     }),
+    keySummary: z.object({
+        risks: z.array(z.string()).describe("Top 1-2 financial risks for immediate attention, each citing exact ₹ amounts."),
+        positives: z.array(z.string()).describe("Top 1-2 positive behaviors or trends worth acknowledging."),
+        actionItem: z.string().describe("Single most impactful action the user should take now, naming a specific category and ₹ amount."),
+    }),
+    dataQualityWarning: z.string().nullable().describe("Data quality caveat when uncategorized spend exceeds 15% in any month. Null if no issues."),
 })
 
 const imagePdfExtractionSchema = z.object({
@@ -284,6 +291,9 @@ const categorySystemMessage = ChatPromptTemplate.fromTemplate(`
         - Choose the single best matching category from the list below
         - For merchantName: extract the canonical brand name (e.g. "Zomato", "Uber", "Netflix")
         - Set merchantName to null when there is no identifiable merchant (P2P transfers, salary credits, EMI payments, ATM withdrawals, bank charges)
+        - For payeeName: when the transaction is a person-to-person transfer (UPI P2P, NEFT, IMPS), extract the person's name from the description
+          Common patterns: "UPI/CR/REF/JOHN DOE/OKICICI" → "John Doe"; "NEFT-JOHN DOE-HDFC0001234" → "John Doe"; "IMPS/123456/JOHN/AXIS" → "John"
+          Set payeeName to null for salary credits, ATM withdrawals, EMI payments, merchant payments, and bank charges
         - Use "Transfers & Payments" for UPI transfers between people
         - Use "Other" if nothing fits confidently
         - Do not invent or modify category names
@@ -307,6 +317,8 @@ Rules:
 - Keep each insight to 2–3 sentences maximum
 - Do not give generic advice like "try to save more"
 - Currency is Indian Rupees (₹)
+- Always cite exact ₹ amounts when referencing any category or merchant — never write "a large chunk" or "significant amount" without a number
+- keySummary must always be populated regardless of tier — state the top risk with a ₹ amount, top positive, and one concrete action naming a specific category and target ₹ amount
 - For sections marked null in your tier, return null exactly — do not generate text for them`],
     ["human", `Tier: {tier} | Months of data: {monthsAvailable} | Period: {monthsCovered}
 
@@ -331,10 +343,14 @@ Rules:
 ── REFUNDS ──
 {refunds}
 
+── DATA QUALITY ──
+{dataQualityWarning}
+
 Tier rules:
 - Tier 1: set seasonalPatterns, unusualTransactions, duplicateDetection, impulseSpend, categoryCreep to null
 - Tier 2: set seasonalPatterns, unusualTransactions, duplicateDetection, categoryCreep to null
-- Tier 3: generate all sections`],
+- Tier 3: generate all sections
+Set output.dataQualityWarning to the DATA QUALITY text above, or null if it says "None".`],
 ])
 
 const imagePdfExtractionPrompt = ChatPromptTemplate.fromMessages([

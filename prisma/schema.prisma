@@ -72,6 +72,7 @@ model Cluster {
   clusterLength            Int
   bankName                 String?
   merchantName             String?
+  payeeName                String?
   category                 String?
   confidence               Float?
   categorySupportRationale String?
