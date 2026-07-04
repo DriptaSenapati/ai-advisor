@@ -101,18 +101,19 @@ model MonthlyStats {
 
 model RecurringPattern {
   id                     String    @id @default(auto()) @map("_id") @db.ObjectId
-  merchantName           String
+  merchantName           String?
+  payeeName              String?
   category               String?
   estimatedMonthlyAmount Float
   frequency              String
   monthsDetected         Int
-  isCancellable          Boolean
+  cancellability         String    // "cancellable" | "pausable" | "obligation" | "essential"
   isActive               Boolean
   lastTransactionDate    DateTime?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 
-  @@unique([merchantName, estimatedMonthlyAmount])
+  @@unique([merchantName, payeeName, estimatedMonthlyAmount])
 }
 
 model InsightReport {

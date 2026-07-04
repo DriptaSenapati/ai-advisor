@@ -53,18 +53,18 @@ const genericTransactionDataSchema = z.object({
 });
 
 const CATEGORIES = [
-    "Food & Dining",
-    "Groceries",
-    "Transport",
-    "Shopping",
-    "Bills & Utilities",
-    "Health & Medical",
-    "Entertainment & Subscriptions",
-    "Education",
-    "Travel & Accommodation",
-    "Finance & Investments",
-    "Transfers & Payments",
-    "Other",
+    { name: "Food & Dining", description: "Restaurants, cafes, food delivery (Zomato, Swiggy), takeaway" },
+    { name: "Groceries", description: "Supermarkets, kirana stores, BigBasket, Blinkit, Zepto" },
+    { name: "Transport", description: "Uber, Ola, auto, metro, fuel, toll, Rapido, parking" },
+    { name: "Shopping", description: "Clothing, electronics, Amazon, Flipkart, Myntra, offline retail" },
+    { name: "Bills & Utilities", description: "Electricity, water, gas, internet, mobile recharge, rent, broadband" },
+    { name: "Health & Medical", description: "Pharmacy, hospital, doctor, diagnostic labs, health apps" },
+    { name: "Entertainment & Subscriptions", description: "Netflix, Hotstar, Spotify, gaming, movie tickets, events" },
+    { name: "Education", description: "School/college fees, online courses, books, coaching" },
+    { name: "Travel & Accommodation", description: "Flights, hotels, Airbnb, trains, MakeMyTrip, Goibibo" },
+    { name: "Finance & Investments", description: "Mutual funds, SIP, stocks, FD, PPF, NPS, EPF, insurance premiums (LIC, term, health). NOT loan EMIs" },
+    { name: "Transfers & Payments", description: "UPI P2P transfers, NEFT, IMPS, loan EMI repayments, credit card bill payments, bank-to-bank transfers" },
+    { name: "Other", description: "Anything that does not clearly fit the above" },
 ] as const;
 
 export { genericTransactionDataSchema, parseTransactionDate, CATEGORIES };

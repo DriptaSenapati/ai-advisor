@@ -110,7 +110,7 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
     const activePatterns = await prisma.recurringPattern.findMany({ where: { isActive: true } });
     const recurringPatterns = activePatterns.length > 0
         ? activePatterns.map(p =>
-            `${p.merchantName ?? "Unknown"} (${p.category ?? "Other"}): ₹${fmt(p.estimatedMonthlyAmount)}/mo, ${p.frequency}, cancellable=${p.isCancellable}, active=${p.isActive}, detected ${p.monthsDetected} months`
+            `${p.merchantName ?? p.payeeName ?? "Unknown"} (${p.category ?? "Other"}): ₹${fmt(p.estimatedMonthlyAmount)}/mo, ${p.frequency}, cancellability=${p.cancellability}, detected ${p.monthsDetected} months`
           ).join("\n")
         : "No recurring patterns detected.";
 

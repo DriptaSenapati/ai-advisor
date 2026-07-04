@@ -288,19 +288,18 @@ const categorySystemMessage = ChatPromptTemplate.fromTemplate(`
         Classify each cluster and return one result per cluster in the same order.
 
         Rules:
-        - Choose the single best matching category from the list below
+        - Choose the single best matching category from the list below using the descriptions provided
         - For merchantName: extract the canonical brand name (e.g. "Zomato", "Uber", "Netflix")
         - Set merchantName to null when there is no identifiable merchant (P2P transfers, salary credits, EMI payments, ATM withdrawals, bank charges)
         - For payeeName: when the transaction is a person-to-person transfer (UPI P2P, NEFT, IMPS), extract the person's name from the description
           Common patterns: "UPI/CR/REF/JOHN DOE/OKICICI" → "John Doe"; "NEFT-JOHN DOE-HDFC0001234" → "John Doe"; "IMPS/123456/JOHN/AXIS" → "John"
           Set payeeName to null for salary credits, ATM withdrawals, EMI payments, merchant payments, and bank charges
-        - Use "Transfers & Payments" for UPI transfers between people
         - Use "Other" if nothing fits confidently
         - Do not invent or modify category names
         - Return exactly one result per cluster in the same order as input
 
         Categories:
-        ${CATEGORIES.map((c, i) => `${i + 1}. ${c}`).join("\n")}
+        ${CATEGORIES.map((c, i) => `${(i + 1).toString().padStart(2)}. ${c.name.padEnd(32)} — ${c.description}`).join("\n        ")}
 
         Clusters:
         {clusters}
