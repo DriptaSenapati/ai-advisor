@@ -126,8 +126,16 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
 
     if (!detectedAsImage) {
         try {
-            await extractTextBased(state.statementPath, metadata.id);
+            const rows = await extractTextBased(state.statementPath, metadata.id);
+            if (rows.length === 0) {
+                await prisma.statementMetadata.update({
+                    where: { id: metadata.id },
+                    data: { normalizerStatus: "Error", normalizerError: "No transactions detected. Header found but no transaction rows could be parsed from the PDF." },
+                });
+                throw new Error("No transactions detected in the extracted PDF.");
+            }
         } catch (err) {
+            if (err instanceof Error && err.message.startsWith("No transactions detected")) throw err;
             console.warn("[PDF Extractor] Text extraction failed — falling back to vision LLM:", err);
             isImageBased = true;
         }
@@ -135,6 +143,13 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
 
     if (isImageBased) {
         const rows = await extractImageBased(state.statementPath, metadata.id);
+        if (rows.length === 0) {
+            await prisma.statementMetadata.update({
+                where: { id: metadata.id },
+                data: { normalizerStatus: "Error", normalizerError: "No transactions detected. Vision LLM found no transaction rows in any page of the PDF." },
+            });
+            throw new Error("No transactions detected in the extracted PDF.");
+        }
         validateMonthRange(rows);
         console.log(`[PDF Extractor] Done — ${rows.length} transaction(s) via vision LLM`);
         return { statementMetadataId: metadata.id, isImageBased: true, transactionData: rows as any };

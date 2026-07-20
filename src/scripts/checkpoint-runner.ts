@@ -13,9 +13,12 @@
  *   npm run dev:checkpoint -- --graph=advisor --from=llm          # re-run only LLM categorization
  *
  * ── Insights graph only ──────────────────────────────────────────────────────
- *   npm run dev:checkpoint -- --graph=insights --metadataId=<id>                    # run insights for statement
+ *   npm run dev:checkpoint -- --graph=insights --metadataId=<id>                    # run insights for statement (recomputes that statement's months only)
  *   npm run dev:checkpoint -- --graph=insights --metadataId=<id> --from=recurring   # resume from recurring node
  *   npm run dev:checkpoint -- --graph=insights --metadataId=<id> --from=insights    # resume from insights LLM node
+ *   npm run dev:checkpoint -- --graph=insights                                      # full recompute across ALL months (no upload needed)
+ *   npm run dev:checkpoint -- --graph=insights --from=recurring                     # full recompute, resume from recurring node
+ *   npm run dev:checkpoint -- --graph=insights --from=insights                      # full recompute, resume from insights LLM node
  *
  * Pair with reset:db to clear the relevant DB collections first.
  */
@@ -23,7 +26,7 @@
 import "../envConfig.js";
 
 const CHECKPOINT_DB = "./dev-checkpoints.sqlite";
-const PDF_PATH = "assets\\2025_statement.pdf";
+const PDF_PATH = "assets\\hsbc_Statement_2.pdf";
 
 // ── shared arg parsing ────────────────────────────────────────────────────────
 
@@ -97,6 +100,7 @@ async function runAdvisor() {
 // ── insights graph ────────────────────────────────────────────────────────────
 
 const INSIGHTS_THREAD_ID = "insights_run";
+const INSIGHTS_FULL_THREAD_ID = "insights_full_recompute";
 
 const INSIGHTS_RESUME_NODE: Record<string, string> = {
     recurring: "recurringPatternToolNode",
@@ -109,11 +113,7 @@ type InsightsStage = typeof INSIGHTS_VALID_STAGES[number];
 async function runInsights() {
     const metadataIdArg = process.argv.find(a => a.startsWith("--metadataId="))?.split("=")[1];
     const fromStage = fromArg as InsightsStage | undefined;
-
-    if (!metadataIdArg) {
-        console.error("--metadataId=<id> is required for insights run. Find the StatementMetadata ID from the DB.");
-        process.exit(1);
-    }
+    const isFullRecompute = !metadataIdArg;
 
     if (fromStage && !INSIGHTS_VALID_STAGES.includes(fromStage)) {
         console.error(`Invalid --from for insights. Use one of: ${INSIGHTS_VALID_STAGES.join(", ")}`);
@@ -125,11 +125,18 @@ async function runInsights() {
 
     const checkpointer = SqliteSaver.fromConnString(CHECKPOINT_DB);
     const agent = insightsAgentGraph.compile({ checkpointer });
-    const threadConfig = { configurable: { thread_id: INSIGHTS_THREAD_ID } };
+    // Full recompute uses a separate thread so it never inherits statementMetadataId from a prior per-statement run
+    const threadId = isFullRecompute ? INSIGHTS_FULL_THREAD_ID : INSIGHTS_THREAD_ID;
+    const threadConfig = { configurable: { thread_id: threadId } };
 
     if (!fromStage) {
-        console.log(`[insights] Full run — metadataId=${metadataIdArg}...`);
-        await agent.invoke({ messages: [], statementMetadataId: metadataIdArg }, threadConfig);
+        if (isFullRecompute) {
+            console.log("[insights] Full recompute — all months across all banks...");
+            await agent.invoke({ messages: [] }, threadConfig);
+        } else {
+            console.log(`[insights] Per-statement run — metadataId=${metadataIdArg}...`);
+            await agent.invoke({ messages: [], statementMetadataId: metadataIdArg }, threadConfig);
+        }
         return;
     }
 
@@ -144,15 +151,42 @@ async function runInsights() {
     }
 
     if (!resumeCheckpointId) {
-        console.error(`No checkpoint found before "${targetNode}".\nRun the full insights pipeline first: npm run dev:checkpoint -- --graph=insights --metadataId=<id>`);
+        const hint = isFullRecompute
+            ? "npm run dev:checkpoint -- --graph=insights"
+            : `npm run dev:checkpoint -- --graph=insights --metadataId=${metadataIdArg}`;
+        console.error(`No checkpoint found before "${targetNode}".\nRun the full pipeline first: ${hint}`);
         process.exit(1);
     }
 
-    console.log(`[insights:${fromStage}] Resuming from checkpoint before "${targetNode}"...`);
+    const resumeLabel = isFullRecompute ? "full recompute" : `metadataId=${metadataIdArg}`;
+    console.log(`[insights:${fromStage}] Resuming (${resumeLabel}) from checkpoint before "${targetNode}"...`);
     await agent.invoke(
-        { messages: [], statementMetadataId: metadataIdArg },
-        { configurable: { thread_id: INSIGHTS_THREAD_ID, checkpoint_id: resumeCheckpointId } }
+        { messages: [], ...(metadataIdArg ? { statementMetadataId: metadataIdArg } : {}) },
+        { configurable: { thread_id: threadId, checkpoint_id: resumeCheckpointId } }
     );
+}
+
+// ── goal advisor ─────────────────────────────────────────────────────────────
+
+async function runGoalAdvisor() {
+    const goalIdArg = process.argv.find(a => a.startsWith("--goalId="))?.split("=")[1];
+
+    if (!goalIdArg) {
+        console.error("--goalId=<id> is required for goal advisor run.");
+        console.error("Usage: npm run dev:checkpoint -- --graph=goal --goalId=<id>");
+        process.exit(1);
+    }
+
+    const { SqliteSaver } = await import("@langchain/langgraph-checkpoint-sqlite");
+    const { goalAdvisorGraph } = await import("../graph.js");
+
+    const checkpointer = SqliteSaver.fromConnString(CHECKPOINT_DB);
+    const agent = (goalAdvisorGraph as any).compile({ checkpointer });
+    const threadConfig = { configurable: { thread_id: `goal_run_${goalIdArg}` } };
+
+    console.log(`[goal] Running goal advisor for goalId=${goalIdArg}...`);
+    await agent.invoke({ goalId: goalIdArg, messages: [] }, threadConfig);
+    console.log("[goal] Done.");
 }
 
 // ── full dry run ──────────────────────────────────────────────────────────────
@@ -194,8 +228,10 @@ async function run() {
         await runAdvisor();
     } else if (graphMode === "insights") {
         await runInsights();
+    } else if (graphMode === "goal") {
+        await runGoalAdvisor();
     } else {
-        console.error(`Unknown --graph value "${graphMode}". Use "advisor", "insights", or omit for full run.`);
+        console.error(`Unknown --graph value "${graphMode}". Use "advisor", "insights", "goal", or omit for full run.`);
         process.exit(1);
     }
 }

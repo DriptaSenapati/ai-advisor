@@ -4,6 +4,7 @@ import {
     StateGraph,
 } from "@langchain/langgraph";
 import { agentGraphSchema, insightsAgentGraphSchema } from "./graph_state.js";
+import { goalAdvisorGraph } from "./graphs/goal_advisor_graph.js";
 import { pdfExtractorToolNode } from "./modules/nodes/pdf_extractor_tool_node.js";
 import { statementNormalizerSubgraph } from "./graphs/statement_normalizer_subgraph.js";
 import { balanceAnalyzerSubgraph } from "./graphs/balace_analyzer_subgraph.js";
@@ -34,7 +35,7 @@ const insightsAgentGraph = new StateGraph(insightsAgentGraphSchema)
     .addEdge("recurringPatternToolNode", "insightsNode")
     .addEdge("insightsNode", END) as any;
 
-export { advisorAgentGraph, insightsAgentGraph };
+export { advisorAgentGraph, insightsAgentGraph, goalAdvisorGraph };
 
 
 

@@ -19,6 +19,9 @@ src/generated/
 .claude/
 CLAUDE.md
 
+# Generated chart output
+charts/
+
 # Generated / extracted data files
 *.FinalTransactionData.json
 *_output.json

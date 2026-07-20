@@ -103,10 +103,15 @@ const insightsGenllmSchema = z.object({
         categoryCreep: z.string().nullable().describe("Categories growing slowly over 3+ months. Null for Tier 1 and Tier 2."),
         refundTracking: z.string().describe("Refunds received — total amount, count, and which categories they came from."),
     }),
+    incomeAnalysis: z.object({
+        periodicSources: z.string().describe("Named income sources with their typical monthly range, frequency, and classification (salary, freelance, rental_income, investment_return, transfer_in). Reference the exact ₹ ranges from the PERIODIC INCOME SOURCES section."),
+        stabilityAssessment: z.string().describe("How stable and predictable the income base is. Cite the floor amount the user can reliably count on each month based on the rangeMin values."),
+        gaps: z.string().nullable().describe("Months where expected income from a periodic source was absent or significantly below its detected range. Null if all sources appear consistent."),
+    }).nullable().describe("Periodic income analysis. Populate whenever PERIODIC INCOME SOURCES lists at least one source; null only when it says 'No periodic income patterns detected.'"),
     keySummary: z.object({
         risks: z.array(z.string()).describe("Top 1-2 financial risks for immediate attention, each citing exact ₹ amounts."),
         positives: z.array(z.string()).describe("Top 1-2 positive behaviors or trends worth acknowledging."),
-        actionItem: z.string().describe("Single most impactful action the user should take now, naming a specific category and ₹ amount."),
+        actionItem: z.string().describe("Single most impactful action the user should take now — target exactly ONE lever: one specific category or expense with a concrete ₹ target. Do not combine two separate recommendations into one sentence."),
     }),
     dataQualityWarning: z.string().nullable().describe("Data quality caveat when uncategorized spend exceeds 15% in any month. Null if no issues."),
 })
@@ -318,8 +323,14 @@ Rules:
 - Currency is Indian Rupees (₹)
 - Always cite exact ₹ amounts when referencing any category or merchant — never write "a large chunk" or "significant amount" without a number
 - keySummary must always be populated regardless of tier — state the top risk with a ₹ amount, top positive, and one concrete action naming a specific category and target ₹ amount
+- actionItem must target exactly ONE lever — the single highest-₹-impact change; never combine two separate unrelated actions into one sentence
+- incomeAnalysis must be populated whenever PERIODIC INCOME SOURCES lists at least one source — reference the exact ₹ ranges and source names; return null only when the section says "No periodic income patterns detected"
+- Reference bank names (from the Banks section) when a pattern is specific to one bank's data or when comparing across banks
+- For Finance & Investments, name the specific merchants from the FINANCE & INVESTMENTS section rather than saying "mid-sized contributions"
+- duplicateDetection: use only the data in SUSPECTED DUPLICATE PAYMENTS — if it says "None detected", state that; do not speculate about duplicates beyond what is listed
 - For sections marked null in your tier, return null exactly — do not generate text for them`],
     ["human", `Tier: {tier} | Months of data: {monthsAvailable} | Period: {monthsCovered}
+Banks: {banks}
 
 ── MONTHLY OVERVIEW ──
 {monthlyOverview}
@@ -327,8 +338,11 @@ Rules:
 ── CATEGORY BREAKDOWN ──
 {categoryBreakdown}
 
-── TOP MERCHANTS ──
+── TOP MERCHANTS (all categories) ──
 {topMerchants}
+
+── FINANCE & INVESTMENTS (named merchants) ──
+{financeInvestmentMerchants}
 
 ── WEEKDAY VS WEEKEND ──
 {weekdayVsWeekend}
@@ -336,11 +350,20 @@ Rules:
 ── TIME OF MONTH ──
 {timeOfMonth}
 
-── RECURRING PATTERNS ──
+── RECURRING EXPENSE PATTERNS ──
 {recurringPatterns}
+
+── RECURRING P2P OUTFLOWS (identified payees) ──
+{knownTransferPayees}
+
+── PERIODIC INCOME SOURCES ──
+{periodicIncome}
 
 ── REFUNDS ──
 {refunds}
+
+── SUSPECTED DUPLICATE PAYMENTS ──
+{duplicateSuspects}
 
 ── DATA QUALITY ──
 {dataQualityWarning}
@@ -349,6 +372,7 @@ Tier rules:
 - Tier 1: set seasonalPatterns, unusualTransactions, duplicateDetection, impulseSpend, categoryCreep to null
 - Tier 2: set seasonalPatterns, unusualTransactions, duplicateDetection, categoryCreep to null
 - Tier 3: generate all sections
+- incomeAnalysis: generate whenever PERIODIC INCOME SOURCES is not "No periodic income patterns detected."; otherwise null
 Set output.dataQualityWarning to the DATA QUALITY text above, or null if it says "None".`],
 ])
 
@@ -381,11 +405,80 @@ const embeddingsModel = new OpenAIEmbeddings({
     batchSize: 512,
 })
 
+const goalAdvisorLlmSchema = z.object({
+    goalFeasibility: z.enum(["achievable", "stretch", "not_feasible"])
+        .describe("Overall feasibility based on Monte Carlo probability: achievable ≥70%, stretch ≥40%, not_feasible <40%"),
+    narrative: z.string()
+        .describe("2-3 sentences summarising current trajectory; must cite exact ₹ amounts"),
+    suggestions: z.array(z.object({
+        action: z.string().describe("Specific, concrete action the user can take"),
+        monthlySavingImpact: z.number()
+            .describe("Realistic positive ₹ improvement to monthly surplus this action produces. Must be grounded in the data provided."),
+        reasoning: z.string()
+            .describe("Why this action is relevant given the user's specific spending data"),
+        category: z.string().nullable()
+            .describe("Spending category this action targets; null if not category-specific"),
+    })).describe("Up to 5 suggestions ordered by monthly saving impact descending"),
+    quickWins: z.array(z.object({
+        action: z.string(),
+        impact: z.string().describe("Short description of the immediate benefit"),
+        oneTimeAmount: z.number().nullable()
+            .describe("One-time ₹ amount released if this is a lump-sum action; null otherwise"),
+    })).describe("Up to 3 quick wins that can be acted on immediately"),
+    timelineNote: z.string()
+        .describe("At current pace you'll reach ₹X by [Month YYYY] — cite the p50 projected amount and deadline month/year"),
+});
 
+const goalAdvisorSystemMessage = ChatPromptTemplate.fromMessages([
+    ["system", `You are a personal financial advisor for Indian users analysing a savings or spending goal.
+You receive Monte Carlo simulation results and historical spending data. Generate specific, actionable guidance.
+
+Rules:
+- Currency is Indian Rupees (₹) — always cite exact amounts; never say "significant" without a number
+- monthlySavingImpact must be a realistic, achievable positive number grounded in the data provided
+- Suggestions must reference specific categories or recurring expenses visible in the data
+- oneTimeAmount must be null when no lump-sum release is possible
+- timelineNote must reference the p50 projected amount and the month/year of the deadline
+- If goalFeasibility is not_feasible, still provide suggestions but frame the narrative honestly
+- Maximum 5 suggestions ordered by impact; maximum 3 quick wins`],
+    ["human", `Goal: {goalType} — Target ₹{targetAmount} by {deadline}
+Category target: {categoryTarget}
+
+Months remaining: {monthsRemaining}
+
+── FINANCIAL SUMMARY ──
+Average monthly surplus (last {monthsOfData} months): ₹{avgMonthlySurplus}
+Required monthly saving: {requiredMonthlySaving}
+Gap per month: {gapPerMonth}
+Data freshness: {dataFreshnessWarning}
+Trend warning: {trendWarning}
+Anomalous months excluded from simulation fit: {dipMonths}
+Robust saving baseline (used by simulation): {robustBaseline}
+
+── MONTE CARLO RESULTS (10,000 simulations) ──
+Probability of reaching goal by deadline: {probabilityOfSuccess}%
+Feasibility tier: {feasibility}
+10th percentile outcome at deadline: ₹{p10}
+Median outcome at deadline: ₹{p50}
+90th percentile outcome at deadline: ₹{p90}
+Median months to goal (if reached in >50% of sims): {monthsToGoalP50}
+
+── CANCELLABLE / PAUSABLE RECURRING EXPENSES ──
+{cancellableRecurring}
+
+── TOP SPENDING CATEGORIES (latest month) ──
+{topCategories}
+
+── MONTHLY SURPLUS TREND (last 6 months) ──
+{surplusTrend}`],
+]);
+
+const goalAdvisorLlm = normalizerLLM.withStructuredOutput(goalAdvisorLlmSchema);
 
 export {
     structuredLlm, llmSystemMessage, llmSystemMessageKeyMapper, keyMapperLlm, embeddingsModel, llmSystemMessageFeedbackLoop, feedbackLoopLlm,
     categorySystemMessage, clusterCategorizationLlm, insightsGenLlm, insightSystemMessage,
     basicDetailsExtractionLlm, basicDetailsExtractionPrompt,
     imagePdfExtractionLlm, imagePdfExtractionPrompt,
+    goalAdvisorLlm, goalAdvisorSystemMessage,
 };

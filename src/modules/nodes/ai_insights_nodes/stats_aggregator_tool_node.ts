@@ -15,24 +15,42 @@ function deriveAffectedMonths(start: Date, end: Date): string[] {
 }
 
 const statsAggregatorToolNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) => {
+    let affectedMonths: string[];
+
     if (state.statementMetadataId) {
+        // ── Per-statement mode: recompute only months covered by this upload ──
         await prisma.statementMetadata.update({
             where: { id: state.statementMetadataId },
             data: { insightsStatus: "Processing" },
         });
+
+        const metadata = await prisma.statementMetadata.findUnique({
+            where: { id: state.statementMetadataId },
+            select: { statementPeriodStart: true, statementPeriodEnd: true },
+        });
+
+        if (!metadata?.statementPeriodStart || !metadata?.statementPeriodEnd) {
+            throw new Error(`StatementMetadata ${state.statementMetadataId} has no period dates set — cannot derive affected months.`);
+        }
+
+        affectedMonths = deriveAffectedMonths(metadata.statementPeriodStart, metadata.statementPeriodEnd);
+        console.log(`[Stats Aggregator] Per-statement mode — affected months: ${affectedMonths.join(", ")}`);
+    } else {
+        // ── Full recompute mode: derive all months from FinalTransactionData ──
+        const distinctResult = await prisma.finalTransactionData.aggregateRaw({
+            pipeline: [
+                { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$date" } } } },
+                { $sort: { _id: 1 } },
+            ],
+        }) as unknown as { _id: string }[];
+
+        if (distinctResult.length === 0) {
+            throw new Error("[Stats Aggregator] No transaction data found. Upload and categorize statements first.");
+        }
+
+        affectedMonths = distinctResult.map(r => r._id);
+        console.log(`[Stats Aggregator] Full recompute mode — all months: ${affectedMonths.join(", ")}`);
     }
-
-    const metadata = await prisma.statementMetadata.findUnique({
-        where: { id: state.statementMetadataId! },
-        select: { statementPeriodStart: true, statementPeriodEnd: true },
-    });
-
-    if (!metadata?.statementPeriodStart || !metadata?.statementPeriodEnd) {
-        throw new Error(`StatementMetadata ${state.statementMetadataId} has no period dates set — cannot derive affected months.`);
-    }
-
-    const affectedMonths = deriveAffectedMonths(metadata.statementPeriodStart, metadata.statementPeriodEnd);
-    console.log(`[Stats Aggregator] Affected months: ${affectedMonths.join(", ")}`);
 
     await statsAggregatorTool.invoke({ affectedMonths });
 

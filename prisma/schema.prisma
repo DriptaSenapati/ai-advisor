@@ -101,19 +101,24 @@ model MonthlyStats {
 
 model RecurringPattern {
   id                     String    @id @default(auto()) @map("_id") @db.ObjectId
+  type                   String?   @default("debit") // "debit" | "credit"
   merchantName           String?
   payeeName              String?
   category               String?
   estimatedMonthlyAmount Float
+  rangeMin               Float?    // credit only: Q1 - 0.5*IQR of monthly amounts
+  rangeMax               Float?    // credit only: Q3 + 0.5*IQR of monthly amounts
+  creditLabel            String?   // "salary" | "freelance" | "rental_income" | "investment_return" | "transfer_in" | "unknown"
+  clusterKey             String?   // unnamed credit clusters: clusterId hex string
   frequency              String
   monthsDetected         Int
-  cancellability         String    // "cancellable" | "pausable" | "obligation" | "essential"
+  cancellability         String?   // "cancellable" | "pausable" | "obligation" | "essential"
   isActive               Boolean
   lastTransactionDate    DateTime?
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 
-  @@unique([merchantName, payeeName, estimatedMonthlyAmount])
+  @@unique([merchantName, payeeName, estimatedMonthlyAmount, type])
 }
 
 model InsightReport {
@@ -123,18 +128,20 @@ model InsightReport {
   tier             Int
   insights         Json
   rawStatsSnapshot Json
+  chartData        Json?
   createdAt        DateTime @default(now())
 }
 
 model Goal {
-  id             String   @id @default(auto()) @map("_id") @db.ObjectId
-  goalType       String
-  targetAmount   Float
-  deadline       DateTime
-  categoryTarget String?
-  status         String   @default("active")
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  goalType         String
+  targetAmount     Float
+  deadline         DateTime
+  categoryTarget   String?
+  status           String   @default("active")
+  simulationResult Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }
 
 model StatementExtractedData {

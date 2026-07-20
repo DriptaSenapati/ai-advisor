@@ -24,7 +24,14 @@ const insightsAgentGraphSchema = new StateSchema({
     insightReports: z.record(z.string(), z.unknown()).optional()
 })
 
-export { agentGraphSchema, insightsAgentGraphSchema };
+const goalAdvisorGraphSchema = new StateSchema({
+    messages: MessagesValue,
+    goalId: z.string(),
+    goalAnalysisResult: z.record(z.string(), z.unknown()).optional(),
+});
+
+export { agentGraphSchema, insightsAgentGraphSchema, goalAdvisorGraphSchema };
 
 export type AgentGraphState = z.infer<typeof agentGraphSchema>;
 export type InsightsAgentGraphState = z.infer<typeof insightsAgentGraphSchema>;
+export type GoalAdvisorGraphState = z.infer<typeof goalAdvisorGraphSchema>;

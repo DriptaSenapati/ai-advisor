@@ -10,7 +10,7 @@
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "verbatimModuleSyntax": false,
-    "target": "es6",
+    "target": "es2022",
     "types": ["node"],
     // For nodejs:
     // "lib": ["esnext"],
