@@ -22,6 +22,9 @@ CLAUDE.md
 # Generated chart output
 charts/
 
+# Temporary PDF uploads (processed and deleted by pipeline)
+uploads/
+
 # Generated / extracted data files
 *.FinalTransactionData.json
 *_output.json

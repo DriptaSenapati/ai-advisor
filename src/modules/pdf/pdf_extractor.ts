@@ -3,14 +3,18 @@ import fs from "fs";
 
 const NUM_LINES_TO_CHECK_FOR_HEADER = 5;
 
-const extractJSONText = (pdfPath: string) => {
-    const doc = mupdf.Document.openDocument(pdfPath).asPDF();
-    if (!doc) throw new Error(`Failed to open PDF: ${pdfPath}`);
-
+const unlockDoc = (doc: ReturnType<ReturnType<typeof mupdf.Document.openDocument>["asPDF"]>, pdfPath: string, password?: string) => {
+    if (!doc) return;
     if (doc.needsPassword()) {
-        const authenticated = doc.authenticatePassword(process.env.PDF_PASSWORD || "");
+        const authenticated = doc.authenticatePassword(password ?? "");
         if (!authenticated) throw new Error(`Incorrect or missing password for PDF: ${pdfPath}`);
     }
+};
+
+const extractJSONText = (pdfPath: string, password?: string) => {
+    const doc = mupdf.Document.openDocument(pdfPath).asPDF();
+    if (!doc) throw new Error(`Failed to open PDF: ${pdfPath}`);
+    unlockDoc(doc, pdfPath, password);
 
     const pageCount = doc.countPages();
     const textContent: Record<string, Record<string, any>> = {};
@@ -272,9 +276,9 @@ const _groupColumns = (rows: {
     return groupColumns;
 }
 
-const buildTransactionData = (pdfPath: string) => {
+const buildTransactionData = (pdfPath: string, password?: string) => {
     // extract JSON text from PDF
-    const textContent = extractJSONText(pdfPath);
+    const textContent = extractJSONText(pdfPath, password);
     // identify header of the transaction table, store y coordinate of the header
     if (!textContent) return;
     const headerDetails = identifyTableHeader(textContent);
@@ -329,13 +333,10 @@ const debugPDF = (pdfPath: string) => {
 
 const IMAGE_BASED_CHAR_THRESHOLD = 50;
 
-const isImageBasedPdf = (pdfPath: string): boolean => {
+const isImageBasedPdf = (pdfPath: string, password?: string): boolean => {
     const doc = mupdf.Document.openDocument(pdfPath).asPDF();
     if (!doc) throw new Error(`Failed to open PDF: ${pdfPath}`);
-    if (doc.needsPassword()) {
-        const authenticated = doc.authenticatePassword(process.env.PDF_PASSWORD || "");
-        if (!authenticated) throw new Error(`Incorrect or missing password for PDF: ${pdfPath}`);
-    }
+    unlockDoc(doc, pdfPath, password);
     let totalChars = 0;
     const pageCount = doc.countPages();
     for (let i = 0; i < pageCount; i++) {
@@ -347,24 +348,17 @@ const isImageBasedPdf = (pdfPath: string): boolean => {
     return true;
 };
 
-const getPageCount = (pdfPath: string): number => {
+const getPageCount = (pdfPath: string, password?: string): number => {
     const doc = mupdf.Document.openDocument(pdfPath).asPDF();
     if (!doc) throw new Error(`Failed to open PDF: ${pdfPath}`);
-    if (doc.needsPassword()) {
-        const authenticated = doc.authenticatePassword(process.env.PDF_PASSWORD || "");
-        if (!authenticated) throw new Error(`Incorrect or missing password for PDF: ${pdfPath}`);
-    }
+    unlockDoc(doc, pdfPath, password);
     return doc.countPages();
 };
 
-const getPageAsBase64 = (pdfPath: string, pageIndex: number = 0, scale: number = 2): string => {
+const getPageAsBase64 = (pdfPath: string, pageIndex: number = 0, scale: number = 2, password?: string): string => {
     const doc = mupdf.Document.openDocument(pdfPath).asPDF();
     if (!doc) throw new Error(`Failed to open PDF: ${pdfPath}`);
-
-    if (doc.needsPassword()) {
-        const authenticated = doc.authenticatePassword(process.env.PDF_PASSWORD || "");
-        if (!authenticated) throw new Error(`Incorrect or missing password for PDF: ${pdfPath}`);
-    }
+    unlockDoc(doc, pdfPath, password);
 
     const page = doc.loadPage(pageIndex);
     const pixmap = page.toPixmap(mupdf.Matrix.scale(scale, scale), mupdf.ColorSpace.DeviceRGB, false);

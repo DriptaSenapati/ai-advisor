@@ -1,5 +1,6 @@
 {
-  "ignore": [
-    "*.json"
-  ]
+  "watch": ["src"],
+  "ignore": ["src/generated/**"],
+  "ext": "ts,json",
+  "delay": "500"
 }

@@ -7,10 +7,10 @@ async function main() {
         goalType: "save_amount",
         targetAmount: 100000,
         deadline: new Date("2026-12-31"),
-    });
+    }, "system");
     console.log("Created goal:", g.id);
 
-    const all = await listGoals();
+    const all = await listGoals("system");
     console.log("All goals:", all.map(g => ({ id: g.id, goalType: g.goalType, targetAmount: g.targetAmount, deadline: g.deadline })));
 
     await prisma.$disconnect();

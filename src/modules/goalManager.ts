@@ -9,11 +9,11 @@ interface CreateGoalInput {
     categoryTarget?: string;
 }
 
-async function createGoal(input: CreateGoalInput) {
+async function createGoal(input: CreateGoalInput, userId: string) {
     if (input.goalType === "reduce_category" && !input.categoryTarget) {
         throw new Error("categoryTarget is required for reduce_category goals.");
     }
-    return prisma.goal.create({ data: input });
+    return prisma.goal.create({ data: { ...input, userId } });
 }
 
 async function updateGoal(id: string, data: Partial<CreateGoalInput>) {
@@ -24,12 +24,12 @@ async function deleteGoal(id: string): Promise<void> {
     await prisma.goal.delete({ where: { id } });
 }
 
-async function listGoals() {
-    return prisma.goal.findMany({ orderBy: { createdAt: "desc" } });
+async function listGoals(userId: string) {
+    return prisma.goal.findMany({ where: { userId }, orderBy: { createdAt: "desc" } });
 }
 
-async function getGoal(id: string) {
-    return prisma.goal.findUnique({ where: { id } });
+async function getGoal(id: string, userId: string) {
+    return prisma.goal.findFirst({ where: { id, userId } });
 }
 
 async function triggerGoalAnalysis(goalId: string): Promise<Record<string, unknown>> {

@@ -28,11 +28,11 @@ const buildPageMessage = (base64: string, text: string) =>
     });
 
 // ── Extract bank name, account number, statement period from page 1 ───────────
-async function extractBasicDetails(pdfPath: string, metadataId: string, fallbackBankName: string) {
+async function extractBasicDetails(pdfPath: string, metadataId: string, fallbackBankName: string, password?: string) {
     try {
         const details = await basicDetailsExtractionPrompt.pipe(basicDetailsExtractionLlm).invoke({
             humanMessage: [buildPageMessage(
-                getPageAsBase64(pdfPath, 0, 2),
+                getPageAsBase64(pdfPath, 0, 2, password),
                 "Extract the bank name, account number, statement start date, and statement end date from this page."
             )],
         });
@@ -52,8 +52,8 @@ async function extractBasicDetails(pdfPath: string, metadataId: string, fallback
 }
 
 // ── mupdf text extraction ─────────────────────────────────────────────────────
-async function extractTextBased(pdfPath: string, metadataId: string): Promise<Record<string, string>[]> {
-    const extractedData = await pdfExtractorTool.invoke({ pdfPath });
+async function extractTextBased(pdfPath: string, metadataId: string, password?: string): Promise<Record<string, string>[]> {
+    const extractedData = await pdfExtractorTool.invoke({ pdfPath, password });
     const rows = extractedData ? Object.values(extractedData).flat() : [];
     const rowsWithTempId = rows.map(tran => ({ ...tran, [TEMP_ID_KEY]: uuidv4() }));
     await prisma.statementExtractedData.create({ data: { statementMetadataId: metadataId, rows: rowsWithTempId } });
@@ -62,8 +62,8 @@ async function extractTextBased(pdfPath: string, metadataId: string): Promise<Re
 }
 
 // ── Vision LLM extraction (per page) ─────────────────────────────────────────
-async function extractImageBased(pdfPath: string, metadataId: string): Promise<Record<string, string>[]> {
-    const pageCount = getPageCount(pdfPath);
+async function extractImageBased(pdfPath: string, metadataId: string, password?: string): Promise<Record<string, string>[]> {
+    const pageCount = getPageCount(pdfPath, password);
     console.log(`[PDF Extractor] Vision extraction — ${pageCount} page(s)`);
     const chain = imagePdfExtractionPrompt.pipe(imagePdfExtractionLlm);
     const allRows: Record<string, string>[] = [];
@@ -71,7 +71,7 @@ async function extractImageBased(pdfPath: string, metadataId: string): Promise<R
     for (let i = 0; i < pageCount; i++) {
         const result = await chain.invoke({
             humanMessage: [buildPageMessage(
-                getPageAsBase64(pdfPath, i, 2),
+                getPageAsBase64(pdfPath, i, 2, password),
                 "Extract all transaction rows from this bank statement page."
             )],
         });
@@ -106,30 +106,41 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
     const pdfBytes = fs.readFileSync(state.statementPath);
     const contentHash = crypto.createHash("sha256").update(pdfBytes).digest("hex");
 
-    const existing = await prisma.statementMetadata.findUnique({ where: { contentHash } });
-    if (existing) {
-        console.warn(`[PDF Extractor] Duplicate detected (id: ${existing.id}). Aborting.`);
-        throw new Error(`Duplicate statement upload: already processed (StatementMetadata id: ${existing.id}).`);
+    let metadataId: string;
+
+    if (state.statementMetadataId) {
+        // API flow: record pre-created by the upload service, just continue
+        metadataId = state.statementMetadataId;
+        console.log(`[PDF Extractor] Using pre-created StatementMetadata (id: ${metadataId})`);
+    } else {
+        // CLI flow: full dedup check + create
+        const existing = await prisma.statementMetadata.findUnique({ where: { contentHash } });
+        if (existing) {
+            console.warn(`[PDF Extractor] Duplicate detected (id: ${existing.id}). Aborting.`);
+            throw new Error(`Duplicate statement upload: already processed (StatementMetadata id: ${existing.id}).`);
+        }
+        const metadata = await prisma.statementMetadata.create({
+            data: { bankName: state.bankName || "Unknown Bank", contentHash, normalizerStatus: "Processing", insightsStatus: "Not Started" },
+        });
+        metadataId = metadata.id;
+        console.log(`[PDF Extractor] StatementMetadata created (id: ${metadataId})`);
     }
 
-    const metadata = await prisma.statementMetadata.create({
-        data: { bankName: state.bankName || "Unknown Bank", contentHash, normalizerStatus: "Processing", insightsStatus: "Not Started" },
-    });
-    console.log(`[PDF Extractor] StatementMetadata created (id: ${metadata.id})`);
+    const password = state.pdfPassword;
 
-    await extractBasicDetails(state.statementPath, metadata.id, state.bankName || "Unknown Bank");
+    await extractBasicDetails(state.statementPath, metadataId, state.bankName || "Unknown Bank", password);
 
-    const detectedAsImage = isImageBasedPdf(state.statementPath);
+    const detectedAsImage = isImageBasedPdf(state.statementPath, password);
     console.log(`[PDF Extractor] Detected: ${detectedAsImage ? "image-based" : "text-based"}`);
 
     let isImageBased = detectedAsImage;
 
     if (!detectedAsImage) {
         try {
-            const rows = await extractTextBased(state.statementPath, metadata.id);
+            const rows = await extractTextBased(state.statementPath, metadataId, password);
             if (rows.length === 0) {
                 await prisma.statementMetadata.update({
-                    where: { id: metadata.id },
+                    where: { id: metadataId },
                     data: { normalizerStatus: "Error", normalizerError: "No transactions detected. Header found but no transaction rows could be parsed from the PDF." },
                 });
                 throw new Error("No transactions detected in the extracted PDF.");
@@ -142,21 +153,21 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
     }
 
     if (isImageBased) {
-        const rows = await extractImageBased(state.statementPath, metadata.id);
+        const rows = await extractImageBased(state.statementPath, metadataId, password);
         if (rows.length === 0) {
             await prisma.statementMetadata.update({
-                where: { id: metadata.id },
+                where: { id: metadataId },
                 data: { normalizerStatus: "Error", normalizerError: "No transactions detected. Vision LLM found no transaction rows in any page of the PDF." },
             });
             throw new Error("No transactions detected in the extracted PDF.");
         }
         validateMonthRange(rows);
         console.log(`[PDF Extractor] Done — ${rows.length} transaction(s) via vision LLM`);
-        return { statementMetadataId: metadata.id, isImageBased: true, transactionData: rows as any };
+        return { statementMetadataId: metadataId, isImageBased: true, transactionData: rows as any };
     }
 
     console.log("[PDF Extractor] Done — text extraction complete");
-    return { statementMetadataId: metadata.id, isImageBased: false };
+    return { statementMetadataId: metadataId, isImageBased: false };
 };
 
 export { pdfExtractorToolNode };

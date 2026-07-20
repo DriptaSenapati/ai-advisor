@@ -7,6 +7,7 @@ const agentGraphSchema = new StateSchema({
     messages: MessagesValue,
     statementPath: z.string(),
     bankName: z.string(),
+    pdfPassword: z.string().optional(),
     statementMetadataId: z.string().optional(),
     isImageBased: z.boolean().default(false),
     overlapOverride: z.boolean().default(false),
