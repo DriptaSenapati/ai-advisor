@@ -19,6 +19,32 @@ const parseISODate = (s: string): Date | null => {
     return isNaN(d.getTime()) ? null : d;
 };
 
+/**
+ * Write the extracted rows, replacing any from an earlier attempt.
+ *
+ * `create()` here was not safe, because this node is retried. BullMQ gives the
+ * extract job three attempts, so a statement that fails once — including the
+ * ordinary "this PDF has no parseable rows" case, which throws — arrives back
+ * here with a `StatementExtractedData` row already present, and the retry died on
+ * `StatementExtractedData_statementMetadataId_key` instead of on the real
+ * problem. The user then saw a Prisma constraint message rather than "no
+ * transactions detected".
+ *
+ * `statementMetadataId` is `@unique`, so an upsert makes the whole node
+ * re-runnable, which it has to be.
+ */
+async function saveExtractedRows(metadataId: string, rows: Record<string, string>[]): Promise<void> {
+    await prisma.statementExtractedData.upsert({
+        where: { statementMetadataId: metadataId },
+        create: { statementMetadataId: metadataId, rows },
+        update: { rows },
+    });
+    await prisma.statementMetadata.update({
+        where: { id: metadataId },
+        data: { rawRowCount: rows.length },
+    });
+}
+
 const buildPageMessage = (base64: string, text: string) =>
     new HumanMessage({
         content: [
@@ -56,7 +82,10 @@ async function extractTextBased(pdfPath: string, metadataId: string, password?: 
     const extractedData = await pdfExtractorTool.invoke({ pdfPath, password });
     const rows = extractedData ? Object.values(extractedData).flat() : [];
     const rowsWithTempId = rows.map(tran => ({ ...tran, [TEMP_ID_KEY]: uuidv4() }));
-    await prisma.statementExtractedData.create({ data: { statementMetadataId: metadataId, rows: rowsWithTempId } });
+    // `rawRowCount` is recorded alongside because it is what the extraction
+    // receipt shows at the gate. `totalTransactions` only lands at the end of the
+    // normalizer subgraph, which does not run until the user has already decided.
+    await saveExtractedRows(metadataId, rowsWithTempId);
     console.log(`[PDF Extractor] Text extraction — ${rows.length} rows across ${Object.keys(extractedData ?? {}).length} page(s)`);
     return rowsWithTempId;
 }
@@ -87,7 +116,7 @@ async function extractImageBased(pdfPath: string, metadataId: string, password?:
         allRows.push(...pageRows);
     }
 
-    await prisma.statementExtractedData.create({ data: { statementMetadataId: metadataId, rows: allRows } });
+    await saveExtractedRows(metadataId, allRows);
     return allRows;
 }
 
@@ -97,6 +126,32 @@ function validateMonthRange(rows: Record<string, string>[]) {
     if (dates.length > 1 && moment.max(...dates).diff(moment.min(...dates), "months", true) > 12) {
         throw new Error("Extracted transactions span more than 12 months. Please provide transactions for a maximum of 12 months.");
     }
+}
+
+// ── Outcome ───────────────────────────────────────────────────────────────────
+//
+// Extraction owns `extractionStatus`/`extractionError`, not `normalizerStatus`.
+// Since the split those are two different questions: extraction is phase 1, and
+// normalisation does not begin until the user presses Illuminate. Reporting an
+// extraction failure as a normalizer failure would claim work had started that
+// nobody has authorised.
+//
+// `isImageBased` is persisted here because it is only knowable at this point, and
+// phase 2 needs it — the image path carries its rows in graph state, so a fresh
+// job has to know to reload them. See `rehydrate_extraction_node.ts`.
+
+async function completeExtraction(metadataId: string, isImageBased: boolean): Promise<void> {
+    await prisma.statementMetadata.update({
+        where: { id: metadataId },
+        data: { extractionStatus: "Completed", extractionError: null, isImageBased },
+    });
+}
+
+async function failExtraction(metadataId: string, message: string): Promise<void> {
+    await prisma.statementMetadata.update({
+        where: { id: metadataId },
+        data: { extractionStatus: "Error", extractionError: message },
+    });
 }
 
 // ── Node ──────────────────────────────────────────────────────────────────────
@@ -120,7 +175,7 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
             throw new Error(`Duplicate statement upload: already processed (StatementMetadata id: ${existing.id}).`);
         }
         const metadata = await prisma.statementMetadata.create({
-            data: { bankName: state.bankName || "Unknown Bank", contentHash, normalizerStatus: "Processing", insightsStatus: "Not Started" },
+            data: { bankName: state.bankName || "Unknown Bank", contentHash, extractionStatus: "Processing", insightsStatus: "Not Started" },
         });
         metadataId = metadata.id;
         console.log(`[PDF Extractor] StatementMetadata created (id: ${metadataId})`);
@@ -139,10 +194,7 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
         try {
             const rows = await extractTextBased(state.statementPath, metadataId, password);
             if (rows.length === 0) {
-                await prisma.statementMetadata.update({
-                    where: { id: metadataId },
-                    data: { normalizerStatus: "Error", normalizerError: "No transactions detected. Header found but no transaction rows could be parsed from the PDF." },
-                });
+                await failExtraction(metadataId, "No transactions detected. Header found but no transaction rows could be parsed from the PDF.");
                 throw new Error("No transactions detected in the extracted PDF.");
             }
         } catch (err) {
@@ -155,17 +207,16 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
     if (isImageBased) {
         const rows = await extractImageBased(state.statementPath, metadataId, password);
         if (rows.length === 0) {
-            await prisma.statementMetadata.update({
-                where: { id: metadataId },
-                data: { normalizerStatus: "Error", normalizerError: "No transactions detected. Vision LLM found no transaction rows in any page of the PDF." },
-            });
+            await failExtraction(metadataId, "No transactions detected. Vision LLM found no transaction rows in any page of the PDF.");
             throw new Error("No transactions detected in the extracted PDF.");
         }
         validateMonthRange(rows);
+        await completeExtraction(metadataId, true);
         console.log(`[PDF Extractor] Done — ${rows.length} transaction(s) via vision LLM`);
         return { statementMetadataId: metadataId, isImageBased: true, transactionData: rows as any };
     }
 
+    await completeExtraction(metadataId, false);
     console.log("[PDF Extractor] Done — text extraction complete");
     return { statementMetadataId: metadataId, isImageBased: false };
 };

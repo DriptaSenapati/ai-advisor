@@ -1,32 +1,201 @@
-import "dotenv/config";
+import "./envConfig.js";
 import fs from "fs/promises";
-import { Worker } from "bullmq";
+import { Worker, type Job } from "bullmq";
 import { connection } from "./queue/connection.js";
 import {
     insightsQueue,
     publish,
+    type ExtractJobData,
     type PdfJobData,
     type InsightsJobData,
     type GoalJobData,
 } from "./queue/index.js";
-import { runAdvisorPipeline } from "./api/services/statements.service.js";
+import { publishStatementProgress } from "./queue/progress.js";
+import {
+    releaseRetainedFile,
+    runExtractionPipeline,
+    runProcessPipeline,
+} from "./api/services/statements.service.js";
+import { isPdfPasswordError } from "./modules/pdf/pdf_extractor.js";
 import { runInsightsPipeline } from "./api/services/insights.service.js";
 import { triggerGoalAnalysis } from "./modules/goalManager.js";
+import { planIdFor } from "./api/middleware/entitlement.js";
+import { jobPriorityFor } from "./config/plans.js";
 
 const workerOpts = { connection };
 
-// --- PDF processing worker ---
+/**
+ * BullMQ fires `failed` once per attempt, and every attempt but the last is
+ * followed by a retry. Only the last one is terminal, so it's the only one the
+ * client should hear about — announcing a failure the queue then quietly
+ * recovers from is worse than saying nothing.
+ */
+const isFinalAttempt = (job?: Job): boolean =>
+    !job || job.attemptsMade >= (job.opts.attempts ?? 3);
+
+/**
+ * Terminal error event for the progress stream.
+ *
+ * The pipelines already record failures in the database (`normalizerStatus:
+ * "Error"` + `normalizerError`), so `GET /statements/:id/status` has always
+ * reported them correctly. The SSE stream did not: the success path published
+ * every stage while the failure path only logged to stdout, so a client
+ * following along would receive `extracting 5%` and then silence forever, with
+ * no way to tell a dead job from a slow one. Every stream now ends in a
+ * terminal event, success or failure.
+ *
+ * `error` carries the same message the status endpoint already exposes as
+ * `normalizerError`, so this reveals nothing new to the client.
+ */
+async function publishFailure(
+    userId: string | undefined,
+    stage: string,
+    err: Error,
+    extra: Record<string, unknown> = {}
+): Promise<void> {
+    if (!userId) return; // nothing to address it to
+    try {
+        // A statement failure carries the record, like every other statement
+        // event, so the client's terminal state comes from `normalizerStatus:
+        // "Error"` rather than from having to trust a stage string.
+        const statementId = extra["statementId"];
+        if (typeof statementId === "string") {
+            await publishStatementProgress(userId, statementId, stage, undefined, { error: err.message });
+            return;
+        }
+        await publish(userId, { stage, error: err.message, ...extra });
+    } catch (publishErr) {
+        // Redis is very likely the reason the job failed in the first place;
+        // an unhandled rejection here would take the whole worker down with it.
+        console.error("[Worker] could not publish failure event:", publishErr);
+    }
+}
+
+/**
+ * Which graph node maps to which announced stage, and how far along it is.
+ *
+ * Both phases publish on every node boundary. Before this the stream went from
+ * `extracting`(5) straight to `pipeline_done`(90) with nothing in between, and
+ * that gap is the entire reason the frontend used to poll: a client cannot be
+ * event-driven against a source that goes silent for the majority of the run.
+ *
+ * The percentages are for humans reading a log or a queue dashboard. The client
+ * derives its stage from the status fields in the attached snapshot instead —
+ * they change at the same boundaries and cannot contradict the record.
+ */
+const NODE_STAGE: Record<string, { stage: string; pct: number }> = {
+    // phase 1
+    pdfExtractorNode: { stage: "extracted", pct: 30 },
+    // phase 2
+    rehydrateNode: { stage: "normalizing", pct: 45 },
+    statementNormalizerSubgraph: { stage: "normalized", pct: 65 },
+    balanceAnalyzerSubgraph: { stage: "balance_checked", pct: 72 },
+    transactionCategorySubgraph: { stage: "categorized", pct: 88 },
+};
+
+const nodeReporter = (userId: string, statementId: string) => async (node: string) => {
+    const step = NODE_STAGE[node];
+    if (!step) return; // an unmapped node is not worth inventing a stage for
+    await publishStatementProgress(userId, statementId, step.stage, step.pct);
+};
+
+/**
+ * An upload runs as two jobs with the user's decision in between.
+ *
+ *   pdf.extract   read the PDF, then stop          ← this is all an upload starts
+ *      ↓                    (the Illuminate gate)
+ *   pdf.process   normalise → balance → categorise → enqueue insights
+ *
+ * The split is what makes "Illuminate" mean something: until it is pressed, no
+ * transaction has been embedded, clustered or sent to an LLM for categorisation.
+ * `POST /statements/:id/process` is the only producer of `pdf.process` jobs.
+ */
+
+// --- Phase 1: extraction ---
+const extractWorker = new Worker<ExtractJobData>(
+    "pdf.extract",
+    async (job) => {
+        const { statementId, filePath, bankName, userId, pdfPassword } = job.data;
+        await publishStatementProgress(userId, statementId, "extracting", 5);
+        // `pdfExtractorNode` completing publishes `extracted`(30) via the reporter.
+        // Terminal for this job, but *not* for the statement — it is now parked at
+        // the gate, and nothing further will be published until the user answers.
+        await runExtractionPipeline(
+            statementId,
+            userId,
+            filePath,
+            bankName,
+            pdfPassword,
+            nodeReporter(userId, statementId)
+        );
+    },
+    {
+        ...workerOpts,
+        concurrency: 2,
+        // Shorter than the process phase: this is mupdf plus one vision call for
+        // page 1, unless the PDF is scanned, in which case it is a call per page.
+        lockDuration: 300_000,
+        lockRenewTime: 60_000,
+    }
+);
+
+/**
+ * The uploaded file is deleted here rather than after processing, and that is
+ * safe rather than lucky: `statementPath` is read only by `pdfExtractorNode`, so
+ * once this job is done nothing else will ever open it. Phase 2 reads rows out of
+ * `StatementExtractedData` instead.
+ */
+extractWorker.on("completed", async (job) => {
+    await fs.rm(job.data.filePath, { force: true }).catch(() => {});
+    // A successful run may be the *retry* of a locked statement, which is the one
+    // case where a file was deliberately kept. Clearing the marker alongside the
+    // delete is what stops `POST /unlock` offering a file that is no longer there.
+    await releaseRetainedFile(job.data.statementId).catch(() => {});
+    console.log(`[Worker] pdf.extract completed: ${job.data.statementId} — awaiting user confirmation`);
+});
+
+/**
+ * A wrong password is the only extraction failure the user can fix, so it is the
+ * only one whose upload is worth keeping.
+ *
+ * Everything else — a corrupt file, an unreadable layout — will fail identically
+ * however many times it is retried, and holding the bytes would just be an
+ * unbounded pile of dead PDFs on disk. A locked statement, by contrast, is one
+ * field away from working, and deleting the file turns that into "upload it
+ * again", which is what this exists to avoid.
+ */
+extractWorker.on("failed", async (job, err) => {
+    if (isFinalAttempt(job)) {
+        // `runExtractionPipeline` has already recorded which case this is, by
+        // writing `retainedFile` when the password was the problem. All that is
+        // left here is to leave those bytes alone.
+        if (job && !isPdfPasswordError(err)) {
+            await fs.rm(job.data.filePath, { force: true }).catch(() => {});
+        }
+        await publishFailure(job?.data.userId, "extract_failed", err, { statementId: job?.data.statementId });
+    }
+    console.error(`[Worker] pdf.extract failed (attempt ${job?.attemptsMade}):`, err.message);
+});
+
+// --- Phase 2: everything the user authorised ---
 const pdfWorker = new Worker<PdfJobData>(
     "pdf.process",
     async (job) => {
-        const { statementId, filePath, bankName, userId, pdfPassword } = job.data;
-        await publish(userId, { stage: "extracting", pct: 5, statementId });
-        await runAdvisorPipeline(statementId, filePath, bankName, pdfPassword);
-        await publish(userId, { stage: "pipeline_done", pct: 90, statementId });
+        const { statementId, userId } = job.data;
+        await runProcessPipeline(statementId, userId, nodeReporter(userId, statementId));
+        await publishStatementProgress(userId, statementId, "pipeline_done", 90);
 
-        // Auto-trigger insights after successful PDF pipeline
-        await insightsQueue.add("insights.generate", { userId, statementId });
-        await publish(userId, { stage: "insights_queued", pct: 95, statementId });
+        // Auto-trigger insights after successful PDF pipeline.
+        // The priority has to be carried across the hand-off: a job added with no
+        // explicit priority is processed *ahead* of prioritized ones in BullMQ, so
+        // omitting it here would let a free account's insights run overtake a
+        // Radiant one — see `jobPriorityFor` in config/plans.ts.
+        await insightsQueue.add(
+            "insights.generate",
+            { userId, statementId },
+            { priority: jobPriorityFor(await planIdFor(userId)) }
+        );
+        await publishStatementProgress(userId, statementId, "insights_queued", 95);
     },
     {
         ...workerOpts,
@@ -36,14 +205,14 @@ const pdfWorker = new Worker<PdfJobData>(
     }
 );
 
-pdfWorker.on("completed", async (job) => {
-    await fs.rm(job.data.filePath, { force: true }).catch(() => {});
-    console.log(`[Worker] pdf.process completed: ${job.data.statementId}`);
-});
+// No file to clean up — this job never had one in its payload.
+pdfWorker.on("completed", (job) =>
+    console.log(`[Worker] pdf.process completed: ${job.data.statementId}`)
+);
 
 pdfWorker.on("failed", async (job, err) => {
-    if (job && job.attemptsMade >= (job.opts.attempts ?? 3)) {
-        await fs.rm(job.data.filePath, { force: true }).catch(() => {});
+    if (isFinalAttempt(job)) {
+        await publishFailure(job?.data.userId, "failed", err, { statementId: job?.data.statementId });
     }
     console.error(`[Worker] pdf.process failed (attempt ${job?.attemptsMade}):`, err.message);
 });
@@ -53,9 +222,15 @@ const insightsWorker = new Worker<InsightsJobData>(
     "insights.generate",
     async (job) => {
         const { userId, statementId } = job.data;
-        await publish(userId, { stage: "insights_started", statementId });
-        await runInsightsPipeline(statementId);
-        await publish(userId, { stage: "insights_done", pct: 100, statementId });
+        // A full recompute has no statementId — an account-level event, with no
+        // statement record to attach.
+        if (statementId) await publishStatementProgress(userId, statementId, "insights_started", 96);
+        else await publish(userId, { stage: "insights_started" });
+
+        await runInsightsPipeline(userId, statementId);
+
+        if (statementId) await publishStatementProgress(userId, statementId, "insights_done", 100);
+        else await publish(userId, { stage: "insights_done", pct: 100 });
     },
     { ...workerOpts, concurrency: 1 }
 );
@@ -63,17 +238,54 @@ const insightsWorker = new Worker<InsightsJobData>(
 insightsWorker.on("completed", (job) =>
     console.log(`[Worker] insights.generate completed: statementId=${job.data.statementId}`)
 );
-insightsWorker.on("failed", (_job, err) =>
-    console.error("[Worker] insights.generate failed:", err.message)
-);
+insightsWorker.on("failed", async (job, err) => {
+    if (isFinalAttempt(job)) {
+        // statementId is absent on a full recompute — an account-level event.
+        await publishFailure(job?.data.userId, "insights_failed", err, {
+            ...(job?.data.statementId ? { statementId: job.data.statementId } : {}),
+        });
+    }
+    console.error(`[Worker] insights.generate failed (attempt ${job?.attemptsMade}):`, err.message);
+});
 
 // --- Goal analysis worker ---
 const goalWorker = new Worker<GoalJobData>(
     "goal.analyze",
     async (job) => {
-        const { goalId, userId } = job.data;
-        await publish(userId, { stage: "goal_analyzing", goalId });
-        await triggerGoalAnalysis(goalId);
+        const { goalId, userId, allowStaleData } = job.data;
+
+        /*
+          Two stages, because the graph has two layers and they feel different: the gate is a
+          second, the simulation is a minute. A screen told only "working" for both would look
+          stuck through the long half.
+        */
+        await publish(userId, { stage: "goal_checking", goalId });
+        const result = await triggerGoalAnalysis(
+            goalId,
+            userId,
+            allowStaleData === true,
+            async (node, emitted) => {
+                /*
+                  The gate finishing is the moment the long half starts — but only if it let
+                  the run through. A rejected gate also completes, and announcing "analyzing"
+                  a beat before `goal_blocked` would be a frame that was never true.
+                */
+                if (node === "goalIntentGateNode" && emitted?.["blocked"] !== true) {
+                    await publish(userId, { stage: "goal_analyzing", goalId });
+                }
+            }
+        );
+
+        /*
+          A gate rejection is a *successful* job with nothing to show, so it cannot ride the
+          `failed` handler. `goal_blocked` carries the reason category and never the user's
+          own words — the copy for it lives in the UI, keyed on `reasonCode`.
+        */
+        if (result["blocked"] === true) {
+            await publish(userId, { stage: "goal_blocked", goalId, reasonCode: result["reasonCode"] });
+            return;
+        }
+
         await publish(userId, { stage: "goal_done", goalId });
     },
     { ...workerOpts, concurrency: 3 }
@@ -82,8 +294,11 @@ const goalWorker = new Worker<GoalJobData>(
 goalWorker.on("completed", (job) =>
     console.log(`[Worker] goal.analyze completed: ${job.data.goalId}`)
 );
-goalWorker.on("failed", (_job, err) =>
-    console.error("[Worker] goal.analyze failed:", err.message)
-);
+goalWorker.on("failed", async (job, err) => {
+    if (isFinalAttempt(job)) {
+        await publishFailure(job?.data.userId, "goal_failed", err, { goalId: job?.data.goalId });
+    }
+    console.error(`[Worker] goal.analyze failed (attempt ${job?.attemptsMade}):`, err.message);
+});
 
-console.log("[Worker] All workers started — pdf.process(×2), insights.generate(×1), goal.analyze(×3)");
+console.log("[Worker] All workers started — pdf.extract(×2), pdf.process(×2), insights.generate(×1), goal.analyze(×3)");

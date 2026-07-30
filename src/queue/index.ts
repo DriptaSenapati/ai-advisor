@@ -7,16 +7,37 @@ const retryDefaults = {
     backoff: { type: "exponential" as const, delay: 30_000 },
 };
 
+export const extractQueue  = new Queue("pdf.extract",       { connection, defaultJobOptions: { ...retryDefaults, backoff: { type: "exponential", delay: 15_000 } } });
 export const pdfQueue      = new Queue("pdf.process",       { connection, defaultJobOptions: { ...retryDefaults } });
 export const insightsQueue = new Queue("insights.generate", { connection, defaultJobOptions: { ...retryDefaults, backoff: { type: "exponential", delay: 60_000 } } });
 export const goalQueue     = new Queue("goal.analyze",      { connection, defaultJobOptions: { ...retryDefaults, backoff: { type: "exponential", delay: 20_000 } } });
 
-export interface PdfJobData {
+/**
+ * Phase 1 of an upload: read the PDF and stop.
+ *
+ * Its own queue rather than a `phase` field on one job, because the two halves
+ * genuinely differ: this one is short, holds a file on disk that has to be
+ * cleaned up, and retries cheaply. `pdf.process` is the multi-minute LLM run
+ * that needs the 10-minute lock.
+ */
+export interface ExtractJobData {
     statementId: string;
     filePath: string;
     bankName: string;
     userId: string;
     pdfPassword?: string;
+}
+
+/**
+ * Phase 2: everything after the user presses Illuminate.
+ *
+ * Carries no `filePath` on purpose — `statementPath` is read only by
+ * `pdfExtractorNode`, so by this point the upload has already been deleted and
+ * every downstream node reads from the database instead.
+ */
+export interface PdfJobData {
+    statementId: string;
+    userId: string;
 }
 
 export interface InsightsJobData {
@@ -27,6 +48,8 @@ export interface InsightsJobData {
 export interface GoalJobData {
     goalId: string;
     userId: string;
+    /** Resolved server-side in `goals.service.ts`; never taken from a client in production. */
+    allowStaleData?: boolean;
 }
 
 const publisher = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379", {

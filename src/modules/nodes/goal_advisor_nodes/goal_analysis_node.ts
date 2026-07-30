@@ -2,31 +2,13 @@ import { GraphNode } from "@langchain/langgraph";
 import { goalAdvisorGraphSchema } from "../../../graph_state.js";
 import { goalAdvisorLlm, goalAdvisorSystemMessage } from "../../../models/index.js";
 import prisma from "../../../prismaClient.js";
+import { computeMean, computeStats, percentile } from "../../stats/robust.js";
 
 // ── Statistics helpers ────────────────────────────────────────────────────────
-
-function computeMean(data: number[]): number {
-    if (data.length === 0) return 0;
-    return data.reduce((a, b) => a + b, 0) / data.length;
-}
-
-function computeStats(data: number[]): { mean: number; std: number; skewness: number } {
-    const n = data.length;
-    const mean = computeMean(data);
-    const variance = n > 1
-        ? data.reduce((sum, x) => sum + (x - mean) ** 2, 0) / (n - 1)
-        : 0;
-    const std = Math.sqrt(variance);
-    const skewness = std > 0 && n >= 3
-        ? data.reduce((sum, x) => sum + ((x - mean) / std) ** 3, 0) / n
-        : 0;
-    return { mean, std, skewness };
-}
-
-function percentile(sortedArr: number[], p: number): number {
-    const idx = Math.min(Math.floor((p / 100) * sortedArr.length), sortedArr.length - 1);
-    return sortedArr[idx]!;
-}
+//
+// `computeMean` / `computeStats` / `percentile` now live in `modules/stats/robust.ts`.
+// The red-flag detectors and the recovery projection need the same definitions, and a
+// second copy would be free to drift from the one this simulation is fitted against.
 
 function computeMonthsRemaining(deadline: Date, now: Date): number {
     const months =
@@ -407,11 +389,15 @@ function extractCategorySpend(
 // ── Node ──────────────────────────────────────────────────────────────────────
 
 const goalAnalysisNode: GraphNode<typeof goalAdvisorGraphSchema> = async (state) => {
-    const { goalId } = state;
+    const { goalId, userId } = state;
     const now = new Date();
 
     // Step 1: Load goal
-    const goal = await prisma.goal.findUniqueOrThrow({ where: { id: goalId } });
+    //
+    // Scoped, like every other read in this node. `findUniqueOrThrow` on the id alone was
+    // both a tenancy hole and a worse error: a goal belonging to someone else would load and
+    // simulate rather than 404.
+    const goal = await prisma.goal.findFirstOrThrow({ where: { id: goalId, userId } });
     const monthsRemaining = computeMonthsRemaining(goal.deadline, now);
 
     // Step 2: Past-deadline short-circuit
@@ -433,18 +419,37 @@ const goalAnalysisNode: GraphNode<typeof goalAdvisorGraphSchema> = async (state)
     }
 
     // Step 3: Load data
-    const allStats = await prisma.monthlyStats.findMany({ orderBy: { month: "asc" } });
+    //
+    // **Both of these must filter on `userId`.** They did not, and the consequence was not a
+    // leak of one field but of the whole simulation: the distribution was fitted to every
+    // user's `netSavings` blended together, and `cancellableRecurring` listed other people's
+    // subscriptions by name straight into the prompt.
+    const allStats = await prisma.monthlyStats.findMany({ where: { userId }, orderBy: { month: "asc" } });
     if (allStats.length === 0) {
         throw new Error("[GoalAdvisor] No MonthlyStats found. Run the stats pipeline first.");
     }
-    const activePatterns = await prisma.recurringPattern.findMany({ where: { isActive: true, OR: [{ type: "debit" }, { type: null }] } });
+    const activePatterns = await prisma.recurringPattern.findMany({ where: { userId, isActive: true, OR: [{ type: "debit" }, { type: null }] } });
 
     // Step 3b: Data freshness check
     const lastDataMonth = allStats[allStats.length - 1]!.month;
     const dataGapMonths = computeDataGapMonths(lastDataMonth, now);
     const freshnessStatus = classifyFreshness(dataGapMonths);
 
-    if (freshnessStatus === "very_stale") {
+    /**
+     * The guard, and the one way past it.
+     *
+     * `allowStaleData` exists so the pipeline can be exercised against a fixture set whose
+     * statements are months behind the wall clock. It is resolved server-side in
+     * `goals.service.ts` — an env var, or a request flag honoured outside production only —
+     * never from anything a deployed client can send.
+     *
+     * A forced run is still marked: `staleOverride: true` rides on the full result below so
+     * the screen can say plainly that the figures are illustrative. Silently producing a
+     * confident-looking probability from year-old data would be worse than refusing.
+     */
+    const staleOverride = freshnessStatus === "very_stale" && state.allowStaleData === true;
+
+    if (freshnessStatus === "very_stale" && !staleOverride) {
         const result = {
             computedAt: now.toISOString(),
             pastDeadline: false,
@@ -459,10 +464,12 @@ const goalAnalysisNode: GraphNode<typeof goalAdvisorGraphSchema> = async (state)
         return { goalAnalysisResult: result };
     }
 
-    const freshnessWarning = dataGapMonths <= 1 ? null
-        : dataGapMonths <= 3
-            ? `Data is ${dataGapMonths} month(s) behind current (last: ${lastDataMonth}). Results are indicative — upload recent statements for higher accuracy.`
-            : `Data is ${dataGapMonths} months behind current (last: ${lastDataMonth}). Projections may be significantly off. Upload recent statements for reliable results.`;
+    const freshnessWarning = staleOverride
+        ? `Simulated on data ${dataGapMonths} months old (last: ${lastDataMonth}), past the point where these projections normally run at all. Every figure here is illustrative.`
+        : dataGapMonths <= 1 ? null
+            : dataGapMonths <= 3
+                ? `Data is ${dataGapMonths} month(s) behind current (last: ${lastDataMonth}). Results are indicative — upload recent statements for higher accuracy.`
+                : `Data is ${dataGapMonths} months behind current (last: ${lastDataMonth}). Projections may be significantly off. Upload recent statements for reliable results.`;
 
     // Step 4: Build random variable array
     const surpluses = allStats.map(s => s.netSavings);
@@ -649,11 +656,23 @@ const goalAnalysisNode: GraphNode<typeof goalAdvisorGraphSchema> = async (state)
     // Step 15: Assemble and persist
     const { finalAmounts: _drop, ...mcResultClean } = mcResult;
     const simulationResult = {
-        computedAt: now.toISOString(),
+        /**
+         * Stamped **now**, not at the top of the node.
+         *
+         * The write below bumps `Goal.updatedAt`, and the UI compares the two to tell "you
+         * edited this goal after it was simulated" from "this result is current". With
+         * `computedAt` taken at node start, the ~460,000-iteration run in between guaranteed
+         * `computedAt < updatedAt` on *every* fresh result, so the screen claimed a goal had
+         * been edited the moment it was first analysed. Taking it here puts the two within
+         * milliseconds of each other, and a genuine edit is minutes or hours later.
+         */
+        computedAt: new Date().toISOString(),
         monthsOfDataUsed: allStats.length,
         pastDeadline: false,
         distributionUsed: distFit.type,
         dataStale: dataGapMonths > 1,
+        /** True only when the `very_stale` guard was deliberately stepped over. */
+        staleOverride,
         freshnessStatus,
         dataGapMonths,
         lastDataMonth,

@@ -1,3 +1,14 @@
+# The whole backend: Redis, the API, and the BullMQ worker. Three services,
+# two images' worth of build (api and worker share one — same `build: .`).
+#
+#   docker compose up -d --build     # everything, containerised
+#   docker compose up -d redis       # just Redis, for `npm run dev:all` on the host
+#
+# `npm run dev:all` uses only the `redis` service and runs the two Node
+# processes on the host with hot reload — that's still the loop to develop in.
+# This file is for rehearsing the deployed shape: real restart policies, the API
+# and worker isolated from each other, and no host toolchain involved.
+
 services:
   redis:
     image: redis:alpine
@@ -5,3 +16,95 @@ services:
     ports:
       - "6379:6379"
     restart: unless-stopped
+    # `docker compose up -d --wait` only waits for a healthcheck if one exists;
+    # without this it returns as soon as the container is *created*, and the API
+    # and worker race it to the port.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 2s
+
+  # The database bootstrap (prisma db push + vector search index) happens
+  # inside this service, in src/api/server.ts, before the port is bound —
+  # there's no separate migrate service. The worker doesn't need one either:
+  # its only source of work is a BullMQ job, and only an API route produces
+  # those, so nothing can reach the worker before the API has finished syncing.
+  api:
+    build: .
+    container_name: ai_advisor_api
+    command: node build/api/server.js
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    env_file:
+      # Must match NODE_ENV below. Compose reads this file on the *host* and
+      # injects the values as container env vars — the file itself is never in
+      # the image (.dockerignore excludes every .env, so secrets can't be baked
+      # into a layer). That's also why the app's own dotenv call is a harmless
+      # no-op in here: it logs `injecting env (0) from .env.production` because
+      # there is no such file to read, and the real values are already present.
+      # In production the orchestrator supplies these directly instead.
+      - .env.production
+    environment:
+      # `environment` overrides `env_file`, which matters: the file says
+      # localhost:6379, correct on the host and wrong inside the network.
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      PORT: 3001
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads:/app/uploads
+    healthcheck:
+      # node, not curl — node:24-slim ships neither curl nor wget.
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      # There is no "begin checking once the server is up" switch — the
+      # healthcheck *is* how Docker discovers that. `start_period` is the
+      # intended way to say it: probes still run, but a failure inside the
+      # window doesn't count toward `retries` and can't mark the container
+      # unhealthy. It's a grace window, not a delay.
+      #
+      # It has to be generous now that the bootstrap runs before listen():
+      # a cold boot against an empty database does a `db push` *and* can sit in
+      # the vector-index build poll for the better part of a minute, during
+      # which nothing answers /health. 15s was fine only while a separate
+      # migrate service absorbed that time ahead of the API starting.
+      start_period: 120s
+      # ...and this is what keeps the long window from costing anything:
+      # during `start_period` only, probe every 2s instead of every 10s. The
+      # container flips to healthy within ~2s of listen() no matter how long
+      # the bootstrap took, rather than waiting out the next 10s tick.
+      # (Requires Docker Engine 25.0+; this host is on 29.6.1.)
+      start_interval: 2s
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: .
+    container_name: ai_advisor_worker
+    command: node build/worker.js
+    restart: unless-stopped
+    env_file:
+      # Same file as api, deliberately — they share a database, a Redis, and an
+      # uploads volume, so a drift between the two is a class of bug that is
+      # very hard to see.
+      - .env.production
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      # Same volume, same mount path as the API — deliberately. The API's multer
+      # writes the upload to an absolute path under /app/uploads and passes that
+      # path through the job payload; the worker opens it verbatim. Mount them
+      # anywhere different and every PDF job fails with ENOENT.
+      - uploads:/app/uploads
+
+volumes:
+  uploads:

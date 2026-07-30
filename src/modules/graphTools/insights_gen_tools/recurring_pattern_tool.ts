@@ -101,8 +101,9 @@ function classifyCreditLabel(
     return "unknown";
 }
 
-const recurringPatternTool = tool(async ({ affectedMonths }) => {
+const recurringPatternTool = tool(async ({ affectedMonths, userId }) => {
     if (affectedMonths.length === 0) return "No affected months.";
+    if (!userId) throw new Error("userId is required for recurring pattern detection.");
 
     const sorted = [...affectedMonths].sort();
     const firstMonth = sorted[0]!;
@@ -116,6 +117,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
     // ── Shared: total months span + latest transaction date ──────────────────
     const distinctMonths = await prisma.finalTransactionData.aggregateRaw({
         pipeline: [
+            { $match: { userId } },
             { $group: { _id: { year: { $year: "$date" }, month: { $month: "$date" } } } },
             { $sort: { "_id.year": 1, "_id.month": 1 } },
         ],
@@ -127,7 +129,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
         : 0;
 
     const maxDateResult = await prisma.finalTransactionData.aggregateRaw({
-        pipeline: [{ $group: { _id: null, maxDate: { $max: "$date" } } }],
+        pipeline: [{ $match: { userId } }, { $group: { _id: null, maxDate: { $max: "$date" } } }],
     }) as unknown as { maxDate: { $date: string } }[];
 
     const maxTransactionDate = maxDateResult[0]?.maxDate
@@ -148,7 +150,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
     // ── Pass 1: Merchant-based recurring debit patterns ──────────────────────
     const affectedMerchantResult = await prisma.finalTransactionData.aggregateRaw({
         pipeline: [
-            { $match: { debitAmount: { $gt: 0 }, clusterId: { $exists: true, $ne: null }, date: dateRangeFilter } },
+            { $match: { userId, debitAmount: { $gt: 0 }, clusterId: { $exists: true, $ne: null }, date: dateRangeFilter } },
             { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
             { $unwind: "$cluster" },
             { $match: { "cluster.merchantName": { $ne: null } } },
@@ -163,7 +165,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
 
         const merchantCandidates = await prisma.finalTransactionData.aggregateRaw({
             pipeline: [
-                { $match: { debitAmount: { $gt: 0 }, clusterId: { $exists: true, $ne: null } } },
+                { $match: { userId, debitAmount: { $gt: 0 }, clusterId: { $exists: true, $ne: null } } },
                 { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
                 { $unwind: "$cluster" },
                 { $match: { "cluster.merchantName": { $in: merchantNames } } },
@@ -199,7 +201,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
             const lastTransactionDate = new Date(candidate.lastTransactionDate.$date);
 
             const existing = await prisma.recurringPattern.findFirst({
-                where: { merchantName, payeeName: null, estimatedMonthlyAmount, type: "debit" }
+                where: { userId, merchantName, payeeName: null, estimatedMonthlyAmount, type: "debit" }
             });
             if (existing) {
                 await prisma.recurringPattern.update({
@@ -208,7 +210,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
                 });
             } else {
                 await prisma.recurringPattern.create({
-                    data: { type: "debit", merchantName, payeeName: null, category: candidate.category, estimatedMonthlyAmount, frequency, monthsDetected: candidate.monthCount, cancellability, isActive, lastTransactionDate },
+                    data: { userId, type: "debit", merchantName, payeeName: null, category: candidate.category, estimatedMonthlyAmount, frequency, monthsDetected: candidate.monthCount, cancellability, isActive, lastTransactionDate },
                 });
             }
             debitMerchantCount++;
@@ -218,7 +220,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
     // ── Pass 2: Payee-based recurring debit patterns (P2P transfers) ──────────
     const affectedPayeeResult = await prisma.finalTransactionData.aggregateRaw({
         pipeline: [
-            { $match: { debitAmount: { $gt: 0 }, clusterId: { $exists: true, $ne: null }, date: dateRangeFilter } },
+            { $match: { userId, debitAmount: { $gt: 0 }, clusterId: { $exists: true, $ne: null }, date: dateRangeFilter } },
             { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
             { $unwind: "$cluster" },
             { $match: { "cluster.merchantName": null, "cluster.payeeName": { $ne: null } } },
@@ -233,7 +235,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
 
         const payeeCandidates = await prisma.finalTransactionData.aggregateRaw({
             pipeline: [
-                { $match: { debitAmount: { $gt: 0 }, clusterId: { $exists: true, $ne: null } } },
+                { $match: { userId, debitAmount: { $gt: 0 }, clusterId: { $exists: true, $ne: null } } },
                 { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
                 { $unwind: "$cluster" },
                 { $match: { "cluster.merchantName": null, "cluster.payeeName": { $in: payeeNames } } },
@@ -269,7 +271,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
             const lastTransactionDate = new Date(candidate.lastTransactionDate.$date);
 
             const existing = await prisma.recurringPattern.findFirst({
-                where: { merchantName: null, payeeName, estimatedMonthlyAmount, type: "debit" }
+                where: { userId, merchantName: null, payeeName, estimatedMonthlyAmount, type: "debit" }
             });
             if (existing) {
                 await prisma.recurringPattern.update({
@@ -278,7 +280,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
                 });
             } else {
                 await prisma.recurringPattern.create({
-                    data: { type: "debit", merchantName: null, payeeName, category: candidate.category, estimatedMonthlyAmount, frequency, monthsDetected: candidate.monthCount, cancellability, isActive, lastTransactionDate },
+                    data: { userId, type: "debit", merchantName: null, payeeName, category: candidate.category, estimatedMonthlyAmount, frequency, monthsDetected: candidate.monthCount, cancellability, isActive, lastTransactionDate },
                 });
             }
             debitPayeeCount++;
@@ -288,7 +290,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
     // ── Pass 3: Merchant-based recurring credit patterns ─────────────────────
     const affectedCreditMerchantResult = await prisma.finalTransactionData.aggregateRaw({
         pipeline: [
-            { $match: { creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null }, date: dateRangeFilter } },
+            { $match: { userId, creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null }, date: dateRangeFilter } },
             { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
             { $unwind: "$cluster" },
             { $match: { "cluster.merchantName": { $ne: null } } },
@@ -303,7 +305,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
 
         const creditMerchantCandidates = await prisma.finalTransactionData.aggregateRaw({
             pipeline: [
-                { $match: { creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null } } },
+                { $match: { userId, creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null } } },
                 { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
                 { $unwind: "$cluster" },
                 { $match: { "cluster.merchantName": { $in: creditMerchantNames } } },
@@ -340,7 +342,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
             const lastTransactionDate = new Date(candidate.lastTransactionDate.$date);
 
             const existing = await prisma.recurringPattern.findFirst({
-                where: { merchantName: candidate._id, payeeName: null, type: "credit" }
+                where: { userId, merchantName: candidate._id, payeeName: null, type: "credit" }
             });
             if (existing) {
                 await prisma.recurringPattern.update({
@@ -349,7 +351,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
                 });
             } else {
                 await prisma.recurringPattern.create({
-                    data: { type: "credit", merchantName: candidate._id, payeeName: null, category: candidate.category, estimatedMonthlyAmount: median, rangeMin, rangeMax, creditLabel, frequency, monthsDetected: candidate.monthCount, cancellability: null, isActive, lastTransactionDate },
+                    data: { userId, type: "credit", merchantName: candidate._id, payeeName: null, category: candidate.category, estimatedMonthlyAmount: median, rangeMin, rangeMax, creditLabel, frequency, monthsDetected: candidate.monthCount, cancellability: null, isActive, lastTransactionDate },
                 });
             }
             creditMerchantCount++;
@@ -359,7 +361,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
     // ── Pass 4: Payee-based recurring credit patterns (P2P inflows) ───────────
     const affectedCreditPayeeResult = await prisma.finalTransactionData.aggregateRaw({
         pipeline: [
-            { $match: { creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null }, date: dateRangeFilter } },
+            { $match: { userId, creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null }, date: dateRangeFilter } },
             { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
             { $unwind: "$cluster" },
             { $match: { "cluster.merchantName": null, "cluster.payeeName": { $ne: null } } },
@@ -374,7 +376,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
 
         const creditPayeeCandidates = await prisma.finalTransactionData.aggregateRaw({
             pipeline: [
-                { $match: { creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null } } },
+                { $match: { userId, creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null } } },
                 { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
                 { $unwind: "$cluster" },
                 { $match: { "cluster.merchantName": null, "cluster.payeeName": { $in: creditPayeeNames } } },
@@ -410,7 +412,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
             const lastTransactionDate = new Date(candidate.lastTransactionDate.$date);
 
             const existing = await prisma.recurringPattern.findFirst({
-                where: { merchantName: null, payeeName: candidate._id, type: "credit" }
+                where: { userId, merchantName: null, payeeName: candidate._id, type: "credit" }
             });
             if (existing) {
                 await prisma.recurringPattern.update({
@@ -419,7 +421,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
                 });
             } else {
                 await prisma.recurringPattern.create({
-                    data: { type: "credit", merchantName: null, payeeName: candidate._id, category: candidate.category, estimatedMonthlyAmount: median, rangeMin, rangeMax, creditLabel: "transfer_in", frequency, monthsDetected: candidate.monthCount, cancellability: null, isActive, lastTransactionDate },
+                    data: { userId, type: "credit", merchantName: null, payeeName: candidate._id, category: candidate.category, estimatedMonthlyAmount: median, rangeMin, rangeMax, creditLabel: "transfer_in", frequency, monthsDetected: candidate.monthCount, cancellability: null, isActive, lastTransactionDate },
                 });
             }
             creditPayeeCount++;
@@ -429,7 +431,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
     // ── Pass 5: Unnamed cluster credit patterns (e.g. salary w/o employer name) ──
     const affectedClusterResult = await prisma.finalTransactionData.aggregateRaw({
         pipeline: [
-            { $match: { creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null }, date: dateRangeFilter } },
+            { $match: { userId, creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null }, date: dateRangeFilter } },
             { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
             { $unwind: "$cluster" },
             { $match: { "cluster.merchantName": null, "cluster.payeeName": null } },
@@ -445,7 +447,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
 
         const creditClusterCandidates = await prisma.finalTransactionData.aggregateRaw({
             pipeline: [
-                { $match: { creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null } } },
+                { $match: { userId, creditAmount: { $gt: MIN_CREDIT_THRESHOLD }, clusterId: { $exists: true, $ne: null } } },
                 { $addFields: { clusterIdStr: { $toString: "$clusterId" } } },
                 { $match: { clusterIdStr: { $in: affectedClusterIds } } },
                 { $lookup: { from: "Cluster", localField: "clusterId", foreignField: "_id", as: "cluster" } },
@@ -486,7 +488,7 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
             const lastTransactionDate = new Date(candidate.lastTransactionDate.$date);
 
             const existing = await prisma.recurringPattern.findFirst({
-                where: { clusterKey: candidate._id, type: "credit" }
+                where: { userId, clusterKey: candidate._id, type: "credit" }
             });
             if (existing) {
                 await prisma.recurringPattern.update({
@@ -495,20 +497,47 @@ const recurringPatternTool = tool(async ({ affectedMonths }) => {
                 });
             } else {
                 await prisma.recurringPattern.create({
-                    data: { type: "credit", merchantName: null, payeeName: null, clusterKey: candidate._id, category: candidate.category, estimatedMonthlyAmount: median, rangeMin, rangeMax, creditLabel, frequency, monthsDetected: candidate.monthCount, cancellability: null, isActive, lastTransactionDate },
+                    data: { userId, type: "credit", merchantName: null, payeeName: null, clusterKey: candidate._id, category: candidate.category, estimatedMonthlyAmount: median, rangeMin, rangeMax, creditLabel, frequency, monthsDetected: candidate.monthCount, cancellability: null, isActive, lastTransactionDate },
                 });
             }
             creditClusterCount++;
         }
     }
 
+    // ── Deactivation sweep ───────────────────────────────────────────────────
+    //
+    // `isActive` was only ever written on rows this run happened to touch, and nothing
+    // deactivated the rest — so a stale pattern stayed "active" forever. That is not a
+    // cosmetic flag: passes 1 and 2 key on the EXACT debit amount, so a subscription
+    // whose price changes creates a *second* row and leaves the old one behind. Both
+    // then read as active, the committed-monthly total double-counts the subscription,
+    // and nothing anywhere says the price went up.
+    //
+    // The rule is `checkIsActive`'s own definition applied to the persisted date: a
+    // pattern is active if it was last seen in the current or previous month, measured
+    // against the latest transaction in the database (never `Date.now()` — a statement
+    // uploaded months late must not mark a live subscription dead).
+    //
+    // `lastTransactionDate: null` rows are left alone rather than guessed at; they
+    // predate that field and there is nothing to judge them by.
+    const prevMonthStart = new Date(maxTransactionDate.getFullYear(), maxTransactionDate.getMonth() - 1, 1);
+    const { count: deactivated } = await prisma.recurringPattern.updateMany({
+        where: {
+            userId,
+            isActive: true,
+            lastTransactionDate: { not: null, lt: prevMonthStart },
+        },
+        data: { isActive: false },
+    });
+
     const total = debitMerchantCount + debitPayeeCount + creditMerchantCount + creditPayeeCount + creditClusterCount;
-    return `Recurring patterns upserted: ${total} (${debitMerchantCount} debit merchants, ${debitPayeeCount} debit payees, ${creditMerchantCount} credit merchants, ${creditPayeeCount} credit payees, ${creditClusterCount} unnamed credit clusters)`;
+    return `Recurring patterns upserted: ${total} (${debitMerchantCount} debit merchants, ${debitPayeeCount} debit payees, ${creditMerchantCount} credit merchants, ${creditPayeeCount} credit payees, ${creditClusterCount} unnamed credit clusters); ${deactivated} stale pattern(s) deactivated`;
 }, {
     name: "recurringPatternTool",
     description: "Re-evaluates recurring payment and income patterns for merchants and payees that have transactions in the affected months.",
     schema: z.object({
         affectedMonths: z.array(z.string()).describe("YYYY-MM months whose transactions were affected by the new upload"),
+        userId: z.string().optional().describe("Owner whose transactions and patterns these are"),
     }),
 });
 

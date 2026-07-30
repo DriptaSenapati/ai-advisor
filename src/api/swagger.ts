@@ -23,6 +23,7 @@ const options: swaggerJsDoc.Options = {
             { name: "Insights", description: "LLM-generated financial insight reports" },
             { name: "Goals", description: "Financial goal management and Monte Carlo analysis" },
             { name: "Transactions", description: "Transaction browsing and aggregations" },
+            { name: "Recurring", description: "Detected recurring debits and periodic income" },
         ],
         components: {
             securitySchemes: {
@@ -80,6 +81,52 @@ const options: swaggerJsDoc.Options = {
                         "application/json": {
                             schema: { $ref: "#/components/schemas/ErrorResponse" },
                             example: { success: false, error: { code: "RATE_LIMITED", message: "Too many requests" } },
+                        },
+                    },
+                },
+                PlanRequired: {
+                    description:
+                        "The caller's subscription plan does not include this feature, or their " +
+                        "allowance of it is used up. `details.requiredPlan` names the cheapest plan " +
+                        "that would allow it, so the client can name it without carrying its own " +
+                        "copy of the catalog.",
+                    content: {
+                        "application/json": {
+                            schema: { $ref: "#/components/schemas/ErrorResponse" },
+                            examples: {
+                                feature: {
+                                    summary: "Feature not in plan",
+                                    value: {
+                                        success: false,
+                                        error: {
+                                            code: "PLAN_REQUIRED",
+                                            message: "This feature is not included in your current plan",
+                                            details: {
+                                                feature: "recurring",
+                                                requiredPlan: "glow",
+                                                currentPlan: "first",
+                                            },
+                                        },
+                                    },
+                                },
+                                limit: {
+                                    summary: "Allowance used up",
+                                    value: {
+                                        success: false,
+                                        error: {
+                                            code: "PLAN_LIMIT_EXCEEDED",
+                                            message: "Your plan includes one statement. Upgrade to add more.",
+                                            details: {
+                                                feature: "statements",
+                                                limit: 1,
+                                                used: 1,
+                                                requiredPlan: "glow",
+                                                currentPlan: "first",
+                                            },
+                                        },
+                                    },
+                                },
+                            },
                         },
                     },
                 },

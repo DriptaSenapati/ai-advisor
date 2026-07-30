@@ -9,13 +9,14 @@
 
 import "../envConfig.js";
 import prisma from "../prismaClient.js";
+import { DEV_USER_ID } from "../config/dev-user.js";
 import { balanceGapAnalyzerNode } from "../modules/nodes/balance_analyzer_nodes/balance_gap_analyzer_node.js";
 import { confidenceCalculatorNode } from "../modules/nodes/balance_analyzer_nodes/confidence_calculator_node.js";
 
 const metadataIdArg = process.argv.find(a => a.startsWith("--metadataId="))?.split("=")[1];
 
 async function runForMetadata(metadataId: string) {
-    const minState = { statementMetadataId: metadataId, statementPath: "", bankName: "", messages: [] } as any;
+    const minState = { userId: DEV_USER_ID, statementMetadataId: metadataId, statementPath: "", bankName: "", messages: [] } as any;
 
     await balanceGapAnalyzerNode(minState, {} as any);
     await confidenceCalculatorNode(minState, {} as any);

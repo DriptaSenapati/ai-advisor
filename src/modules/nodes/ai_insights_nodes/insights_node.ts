@@ -2,6 +2,8 @@ import { GraphNode } from "@langchain/langgraph";
 import { insightsAgentGraphSchema } from "../../../graph_state.js";
 import prisma from "../../../prismaClient.js";
 import { insightsGenLlm, insightSystemMessage } from "../../../models/index.js";
+import { buildRecoveryProjection, type RecommendationImpact } from "../../insights/recovery_projection.js";
+import { median } from "../../stats/robust.js";
 
 type CategoryBreakdown = {
     category: string;
@@ -44,9 +46,12 @@ const fmt = (n: number) => n.toFixed(0);
 const fmtPct = (n: number) => n.toFixed(1);
 
 const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) => {
+    const userId = state.userId;
+
     const [monthlyStats, statements] = await Promise.all([
-        prisma.monthlyStats.findMany({ orderBy: { month: "asc" } }),
+        prisma.monthlyStats.findMany({ where: { userId }, orderBy: { month: "asc" } }),
         prisma.statementMetadata.findMany({
+            where: { userId },
             select: { bankName: true, statementPeriodStart: true, statementPeriodEnd: true },
             orderBy: { statementPeriodStart: "asc" },
         }),
@@ -150,7 +155,7 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
     // ── Recurring patterns — debit expenses ──
     // OR clause to migrate existing records that were created before the `type` field was added
     const activeDebitPatterns = await prisma.recurringPattern.findMany({
-        where: { isActive: true, OR: [{ type: "debit" }, { type: null }] },
+        where: { userId, isActive: true, OR: [{ type: "debit" }, { type: null }] },
     });
     const recurringPatterns = activeDebitPatterns.length > 0
         ? activeDebitPatterns.map(p =>
@@ -168,7 +173,7 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
 
     // ── Recurring patterns — credit income ──
     const activeCreditPatterns = await prisma.recurringPattern.findMany({
-        where: { isActive: true, type: "credit" },
+        where: { userId, isActive: true, type: "credit" },
     });
     const periodicIncome = activeCreditPatterns.length > 0
         ? activeCreditPatterns.map(p => {
@@ -185,7 +190,7 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
     try {
         const dupRaw = await prisma.finalTransactionData.aggregateRaw({
             pipeline: [
-                { $match: { debitAmount: { $gt: 1000 }, clusterId: { $exists: true, $ne: null } } },
+                { $match: { userId, debitAmount: { $gt: 1000 }, clusterId: { $exists: true, $ne: null } } },
                 { $group: {
                     _id: {
                         clusterId: { $toString: "$clusterId" },
@@ -204,7 +209,7 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
         if (dupRaw.length > 0) {
             const clusterIds = dupRaw.map(d => d._id.clusterId);
             const clusters = await prisma.cluster.findMany({
-                where: { id: { in: clusterIds } },
+                where: { id: { in: clusterIds }, userId },
                 select: { id: true, merchantName: true, payeeName: true },
             });
             const clusterMap = new Map(clusters.map(c => [c.id, c]));
@@ -217,6 +222,46 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
         }
     } catch {
         // non-fatal: duplicate detection is best-effort
+    }
+
+    // ── Flagged transactions ────────────────────────────────────────────────
+    //
+    // `redFlagDetectorToolNode` ran immediately before this node and has already written
+    // every flag to `TransactionFlag`. What is assembled here is only the *summary* the LLM
+    // narrates from — grouped by kind, with counts, totals and a few examples. The model
+    // never sees a transaction id and never decides what is flagged; it writes one paragraph
+    // per kind and the UI joins those back on the `kind` enum.
+    //
+    // Note the asymmetry with `duplicateSuspects` above, which is prose and nothing else.
+    // That is the bug this section exists to stop repeating: duplicate detection has always
+    // been algorithmic and correct, and its structured result was joined into a string and
+    // dropped, so no UI could render it. It is now also a `duplicate_charge` flag row.
+    let flaggedTransactions = "No flags detected.";
+    try {
+        const flags = await prisma.transactionFlag.findMany({
+            where: { userId },
+            orderBy: [{ severity: "asc" }, { amount: "desc" }],
+        });
+
+        if (flags.length > 0) {
+            const grouped = new Map<string, typeof flags>();
+            for (const f of flags) {
+                const list = grouped.get(f.kind) ?? [];
+                list.push(f);
+                grouped.set(f.kind, list);
+            }
+
+            flaggedTransactions = [...grouped.entries()]
+                .map(([kind, list]) => {
+                    const total = list.reduce((s, f) => s + f.amount, 0);
+                    const high = list.filter(f => f.severity === "high").length;
+                    const examples = list.slice(0, 4).map(f => `    • ${f.title} (${f.month})`).join("\n");
+                    return `  ${kind}: ${list.length} flag(s), ${high} high severity, ₹${fmt(total)} at stake\n${examples}`;
+                })
+                .join("\n");
+        }
+    } catch {
+        // non-fatal: the report is worth generating without the narrative for these
     }
 
     // ── Refunds ──
@@ -251,6 +296,7 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
         periodicIncome,
         refunds,
         duplicateSuspects,
+        flaggedTransactions,
         dataQualityWarning,
     };
 
@@ -327,18 +373,70 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
         periodicIncome,
         refunds,
         duplicateSuspects,
+        flaggedTransactions,
         dataQualityWarning: dataQualityWarning ?? "None",
     });
 
     const insightReport = await insightsGenLlm.invoke(prompt);
 
+    // ── Recovery projection ─────────────────────────────────────────────────
+    //
+    // Built *after* the LLM call because it is built *from* it: each recommendation's
+    // `monthlySavingImpact` becomes a forward path, and the chart is what turns "save
+    // ₹4,000/month" from an assertion into an argument. Deterministic arithmetic over the
+    // monthly history — no simulation; the goal advisor owns Monte Carlo, and a goal has a
+    // target and deadline to be feasible against where this only compares trajectories.
+    //
+    // Best-effort: a malformed `recommendations` array must not cost the whole report,
+    // which by this point is one paid LLM call already spent.
+    let recoveryProjection = null;
+    try {
+        const recommendations = ((insightReport as { recommendations?: unknown }).recommendations ?? []) as RecommendationImpact[];
+
+        /**
+         * Ceilings for what each recommendation may claim, from this user's own history.
+         *
+         * Medians, not means, and for the same reason the baseline is robust: the outlier
+         * month that produces an inflated claim must not also be what raises the ceiling
+         * meant to catch it. See `boundImpact` for what went wrong without this.
+         */
+        const categorySpend = new Map<string, number[]>();
+        for (const s of monthlyStats) {
+            for (const c of (s.categoryBreakdown as unknown as CategoryBreakdown[])) {
+                if (!c?.category) continue;
+                const list = categorySpend.get(c.category) ?? [];
+                list.push(c.totalSpend);
+                categorySpend.set(c.category, list);
+            }
+        }
+        const categoryMedians: Record<string, number> = {};
+        for (const [category, values] of categorySpend) {
+            categoryMedians[category] = median(values);
+        }
+
+        recoveryProjection = buildRecoveryProjection(
+            monthlyStats.map(s => ({ month: s.month, netSavings: s.netSavings })),
+            recommendations.filter(r => typeof r?.slug === "string" && typeof r?.monthlySavingImpact === "number"),
+            {
+                medianMonthlyExpenses: median(monthlyStats.map(s => s.totalExpenses)),
+                categoryMedians,
+            },
+        );
+    } catch (err) {
+        console.error("[Insights] recovery projection failed:", err);
+    }
+
     await prisma.insightReport.create({
         data: {
+            userId,
             monthsCovered,
             tier,
             insights: insightReport,
             rawStatsSnapshot,
-            chartData,
+            // Cast because Prisma's `InputJsonValue` requires an index signature and
+            // `RecoveryProjection` is a named interface. The shape is plain arrays,
+            // numbers, strings and booleans — JSON-safe by construction.
+            chartData: { ...chartData, recoveryProjection } as never,
         },
     });
 

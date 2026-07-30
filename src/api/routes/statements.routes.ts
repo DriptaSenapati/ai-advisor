@@ -1,13 +1,15 @@
 import { Router } from "express";
 import * as statementsController from "../controllers/statements.controller.js";
 import { validate } from "../middleware/validate.js";
-import { uploadLimiter } from "../middleware/rateLimiter.js";
+import { processLimiter, uploadLimiter } from "../middleware/rateLimiter.js";
 import { uploadMiddleware } from "../middleware/upload.js";
 import { requireAuth } from "../middleware/authenticate.js";
 import {
     uploadStatementSchema,
     listStatementsQuerySchema,
     listTransactionsQuerySchema,
+    declineStatementSchema,
+    unlockStatementSchema,
 } from "../validators/statements.validator.js";
 
 const router = Router();
@@ -18,7 +20,12 @@ const router = Router();
  *   post:
  *     tags: [Statements]
  *     summary: Upload a bank statement PDF
- *     description: Accepts a PDF file and bankName. Starts processing pipeline asynchronously. Returns statementId immediately — poll /statements/{id}/status to track progress.
+ *     description: |
+ *       Accepts a PDF file and bankName, and starts **extraction only** — phase 1 of two.
+ *       The statement is read (bank, account, period, raw row count) and then waits.
+ *       Categorisation and insights do not run until the user confirms via
+ *       `POST /statements/{id}/process`. Returns statementId immediately — poll
+ *       /statements/{id}/status to track progress.
  *     requestBody:
  *       required: true
  *       content:
@@ -43,6 +50,8 @@ const router = Router();
  *               $ref: '#/components/schemas/AcceptedResponse'
  *       400:
  *         $ref: '#/components/responses/ValidationError'
+ *       403:
+ *         $ref: '#/components/responses/PlanRequired'
  *       409:
  *         description: Duplicate statement
  *       429:
@@ -74,12 +83,131 @@ router.post(
  *         schema: { type: string }
  *       - in: query
  *         name: status
- *         schema: { type: string, enum: [Processing, Completed, Error] }
+ *         description: Filters normalizerStatus. "Not Started" is the resting state at the Illuminate gate.
+ *         schema: { type: string, enum: [Not Started, Processing, Completed, Error] }
+ *       - in: query
+ *         name: gate
+ *         description: The user's answer at the Illuminate gate. Use gate=pending to count statements awaiting a decision.
+ *         schema: { type: string, enum: [pending, approved, declined] }
  *     responses:
  *       200:
  *         description: Paginated statement list
  */
 router.get("/", validate(listStatementsQuerySchema, "query"), statementsController.listStatements);
+
+/**
+ * @openapi
+ * /statements/{id}/process:
+ *   post:
+ *     tags: [Statements]
+ *     summary: Illuminate — authorise phase 2 of the pipeline
+ *     description: |
+ *       Starts normalisation, balance analysis, categorisation and insights for a
+ *       statement that has finished extracting. This is the gate: nothing after
+ *       extraction runs until it is called. Records an "approved" decision.
+ *
+ *       A previously declined statement may be approved — decline is reversible.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       202:
+ *         description: Processing started
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ *       409:
+ *         description: |
+ *           NOT_EXTRACTED (still reading), EXTRACTION_FAILED (unreadable PDF), or
+ *           ALREADY_STARTED (idempotency — processing is already under way).
+ *       429:
+ *         $ref: '#/components/responses/RateLimited'
+ */
+router.post("/:id/process", processLimiter, statementsController.startProcessing);
+
+/**
+ * @openapi
+ * /statements/{id}/decline:
+ *   post:
+ *     tags: [Statements]
+ *     summary: Decline to illuminate, for now
+ *     description: |
+ *       Records that the user chose not to process this statement. Nothing is
+ *       enqueued and nothing is deleted — the statement stays at the gate and can
+ *       be approved later via /statements/{id}/process. To remove it entirely,
+ *       use DELETE /statements/{id}.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reason: { type: string, maxLength: 300 }
+ *     responses:
+ *       200:
+ *         description: Decision recorded
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ *       409:
+ *         description: NOT_EXTRACTED, EXTRACTION_FAILED, or ALREADY_STARTED
+ */
+router.post("/:id/decline", validate(declineStatementSchema), statementsController.declineProcessing);
+
+/**
+ * @openapi
+ * /statements/{id}/unlock:
+ *   post:
+ *     tags: [Statements]
+ *     summary: Retry a password-protected statement
+ *     description: |
+ *       Re-runs extraction for a statement that failed with
+ *       "incorrect or missing password", using the password supplied here and the
+ *       upload the worker kept for exactly this purpose. No file is sent: the same
+ *       statement id, and therefore the same content hash, survives the retry.
+ *
+ *       Only statements whose upload is still held can be retried this way —
+ *       `awaitingPassword` on the statement says whether that is so.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [password]
+ *             properties:
+ *               password: { type: string, maxLength: 256 }
+ *     responses:
+ *       202:
+ *         description: Extraction re-queued
+ *       404:
+ *         $ref: '#/components/responses/NotFound'
+ *       409:
+ *         description: |
+ *           SOURCE_UNAVAILABLE — the original upload is no longer held, so the
+ *           file has to be sent again through POST /statements/upload.
+ *       429:
+ *         $ref: '#/components/responses/RateLimited'
+ */
+router.post(
+    "/:id/unlock",
+    // The upload limiter, not the process one: this re-runs extraction, which is
+    // what an upload costs, and it would otherwise be an unmetered way to run it.
+    uploadLimiter,
+    validate(unlockStatementSchema),
+    statementsController.unlockStatement
+);
 
 /**
  * @openapi

@@ -37,8 +37,11 @@ const statsAggregatorToolNode: GraphNode<typeof insightsAgentGraphSchema> = asyn
         console.log(`[Stats Aggregator] Per-statement mode — affected months: ${affectedMonths.join(", ")}`);
     } else {
         // ── Full recompute mode: derive all months from FinalTransactionData ──
+        // "All months" means all of *this user's* months. Unscoped, a full
+        // recompute would fan out over every tenant's date range.
         const distinctResult = await prisma.finalTransactionData.aggregateRaw({
             pipeline: [
+                { $match: { userId: state.userId } },
                 { $group: { _id: { $dateToString: { format: "%Y-%m", date: "$date" } } } },
                 { $sort: { _id: 1 } },
             ],
@@ -52,7 +55,7 @@ const statsAggregatorToolNode: GraphNode<typeof insightsAgentGraphSchema> = asyn
         console.log(`[Stats Aggregator] Full recompute mode — all months: ${affectedMonths.join(", ")}`);
     }
 
-    await statsAggregatorTool.invoke({ affectedMonths });
+    await statsAggregatorTool.invoke({ affectedMonths, userId: state.userId });
 
     return { affectedMonths };
 }

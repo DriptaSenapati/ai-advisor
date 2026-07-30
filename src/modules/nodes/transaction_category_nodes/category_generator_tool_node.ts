@@ -13,7 +13,10 @@ const clusterGeneratorToolNode: GraphNode<typeof agentGraphSchema> = async (stat
         });
     }
 
-    await clusterGeneratorTool.invoke({ statementMetadataId: state.statementMetadataId });
+    await clusterGeneratorTool.invoke({
+        statementMetadataId: state.statementMetadataId,
+        userId: state.userId,
+    });
     console.log(`[Cluster Generator] Done`);
     return {};
 }

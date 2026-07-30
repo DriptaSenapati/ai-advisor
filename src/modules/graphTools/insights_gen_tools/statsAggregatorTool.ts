@@ -25,15 +25,16 @@ type AggregationResult = [{
     timeOfMonth: { _id: string; totalSpend: number; txnCount: number }[];
 }];
 
-const statsAggregatorTool = tool(async ({ affectedMonths }) => {
+const statsAggregatorTool = tool(async ({ affectedMonths, userId }) => {
     if (affectedMonths.length === 0) return "No months to process.";
+    if (!userId) throw new Error("userId is required for stats aggregation.");
 
     const sorted = [...affectedMonths].sort();
 
     // Cascade: recompute the month immediately after the last affected month
     // so its momDelta references up-to-date data
     const cascade = nextMonth(sorted[sorted.length - 1]!);
-    const cascadeExists = await prisma.monthlyStats.findFirst({ where: { month: cascade } });
+    const cascadeExists = await prisma.monthlyStats.findFirst({ where: { month: cascade, userId } });
     const monthsToProcess = cascadeExists ? [...sorted, cascade] : sorted;
 
     console.log(`[Stats Aggregator] Processing: ${monthsToProcess.join(", ")}${cascadeExists ? ` (cascade: ${cascade})` : ""}`);
@@ -45,6 +46,7 @@ const statsAggregatorTool = tool(async ({ affectedMonths }) => {
             pipeline: [
                 {
                     $match: {
+                        userId,
                         date: {
                             $gte: { $date: { $numberLong: String(start.getTime()) } },
                             $lt: { $date: { $numberLong: String(end.getTime()) } },
@@ -220,7 +222,7 @@ const statsAggregatorTool = tool(async ({ affectedMonths }) => {
         };
 
         const historicalStats = await prisma.monthlyStats.findMany({
-            where: { month: { lt: month } },
+            where: { month: { lt: month }, userId },
             orderBy: { month: "desc" },
             take: 6,
         });
@@ -266,12 +268,15 @@ const statsAggregatorTool = tool(async ({ affectedMonths }) => {
             timeOfMonth,
         };
 
-        const existing = await prisma.monthlyStats.findFirst({ where: { month } });
-        if (existing) {
-            await prisma.monthlyStats.update({ where: { id: existing.id }, data: statsData });
-        } else {
-            await prisma.monthlyStats.create({ data: { month, ...statsData } });
-        }
+        // A real upsert now. This was findFirst-then-branch only because `month`
+        // carried no unique constraint; `@@unique([userId, month])` gives it one,
+        // which also closes the race where two concurrent runs both saw no row
+        // and both created one.
+        await prisma.monthlyStats.upsert({
+            where: { userId_month: { userId, month } },
+            update: statsData,
+            create: { userId, month, ...statsData },
+        });
 
         console.log(`[Stats Aggregator] Upserted MonthlyStats for ${month}`);
     }
@@ -282,6 +287,7 @@ const statsAggregatorTool = tool(async ({ affectedMonths }) => {
     description: "Recomputes MonthlyStats for the given affected months plus the immediately following month (momDelta cascade).",
     schema: z.object({
         affectedMonths: z.array(z.string()).describe("List of YYYY-MM months to recompute"),
+        userId: z.string().optional().describe("Owner whose transactions and stats these are"),
     }),
 });
 

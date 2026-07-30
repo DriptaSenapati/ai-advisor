@@ -52,6 +52,7 @@ model ExceptionTransactions {
 
 model FinalTransactionData {
   id                  String             @id @default(auto()) @map("_id") @db.ObjectId
+  userId              String
   date                DateTime
   description         String
   creditAmount        Float
@@ -64,10 +65,13 @@ model FinalTransactionData {
   statementMetadata   StatementMetadata? @relation(fields: [statementMetadataId], references: [id])
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
+
+  @@index([userId, date])
 }
 
 model Cluster {
   id                       String                 @id @default(auto()) @map("_id") @db.ObjectId
+  userId                   String
   transactions             FinalTransactionData[]
   clusterLength            Int
   bankName                 String?
@@ -79,10 +83,39 @@ model Cluster {
   centroid                 String
   createdAt                DateTime               @default(now())
   updatedAt                DateTime               @updatedAt
+
+  @@index([userId, bankName])
+}
+
+/// One spelling of a payee that was folded into another.
+///
+/// Provenance for `payeeCanonicalizerTool`, which rewrites `Cluster.payeeName` in place — so
+/// without this the old spelling is simply gone and the UI can only assert that a name is
+/// correct. A merge is a judgement call made by an algorithm about somebody's money, and the
+/// reader is owed the working: which spellings were folded in, and how much each carried.
+///
+/// Written at merge time and **never deleted by a later run**. That is load-bearing rather
+/// than lazy: once `SENAPATI D` has been rewritten it no longer exists on any cluster, so the
+/// next run sees nothing to merge and would drop the record if it recomputed the table from
+/// current state.
+model PayeeAlias {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String
+  /// The spelling that survived — matches `Cluster.payeeName`.
+  canonical String
+  /// The spelling that was folded in.
+  alias     String
+  /// Transactions that carried the alias, for the popup's per-spelling count.
+  txnCount  Int      @default(0)
+  mergedAt  DateTime @default(now())
+
+  @@unique([userId, alias])
+  @@index([userId, canonical])
 }
 
 model MonthlyStats {
   id                String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId            String
   month             String
   totalIncome       Float
   totalExpenses     Float
@@ -97,10 +130,15 @@ model MonthlyStats {
   timeOfMonth       Json
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
+
+  // `month` alone was never unique, so the upsert was emulated with
+  // findFirst + update. Scoped by user it is a real key, and a real upsert.
+  @@unique([userId, month])
 }
 
 model RecurringPattern {
   id                     String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId                 String
   type                   String?   @default("debit") // "debit" | "credit"
   merchantName           String?
   payeeName              String?
@@ -118,12 +156,56 @@ model RecurringPattern {
   createdAt              DateTime  @default(now())
   updatedAt              DateTime  @updatedAt
 
-  @@unique([merchantName, payeeName, estimatedMonthlyAmount, type])
+  // Without `userId` in this key, two users whose salary happens to be the same
+  // amount collide on a single row — one overwrites the other's pattern.
+  @@unique([userId, merchantName, payeeName, estimatedMonthlyAmount, type])
+}
+
+/// One flagged transaction (or one flagged pattern, for the two kinds that have no single
+/// transaction behind them). Written by `red_flag_detector_tool.ts` — every detector is a
+/// deterministic Mongo aggregation, so each row carries a real amount, date and id and can
+/// be sorted, filtered and linked. The LLM only narrates the *kinds*, never the rows.
+///
+/// Deliberately NOT a field on `FinalTransactionData`: one transaction can trip several
+/// detectors, thresholds move as more months arrive, and re-running detection must not
+/// rewrite the transaction ledger.
+model TransactionFlag {
+  id       String @id @default(auto()) @map("_id") @db.ObjectId
+  userId   String
+  // Deterministic identity: "<kind>:<transactionId|label>:<month>". The insights
+  // pipeline re-runs on every statement upload, so a create-only detector would
+  // multiply flags on each pass; this key makes the write idempotent.
+  dedupeKey String
+  kind     String // duplicate_charge | merchant_outlier | category_spike_contributor
+  //                | fee_or_interest | subscription_price_hike | balance_risk
+  //                | large_opaque_transfer
+  severity String // "high" | "medium" | "low"
+  month    String // "YYYY-MM"
+
+  // Null for the two pattern-level kinds (subscription_price_hike has no single txn).
+  transactionId String?   @db.ObjectId
+  clusterId     String?   @db.ObjectId
+  label         String // merchant / payee / centroid, snapshotted at detection time
+  category      String?
+  amount        Float
+  occurredAt    DateTime?
+
+  title      String
+  detail     String
+  evidence   Json? // kind-specific: {count,dates[]} | {median,ratio} | {oldAmount,newAmount} | …
+  detectedAt DateTime @default(now())
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, severity])
+  @@index([userId, month])
 }
 
 model InsightReport {
   id               String   @id @default(auto()) @map("_id") @db.ObjectId
-  userId           String?
+  // Required, not optional. As `String?` this was declared, filtered on every
+  // read, and never once written — so `/insights/*` 404'd for every user and
+  // nothing complained. A required field turns that into a write-time error.
+  userId           String
   generatedAt      DateTime @default(now())
   monthsCovered    String[]
   tier             Int
@@ -134,16 +216,23 @@ model InsightReport {
 }
 
 model Goal {
-  id               String   @id @default(auto()) @map("_id") @db.ObjectId
-  userId           String
+  id     String @id @default(auto()) @map("_id") @db.ObjectId
+  userId String
+  /// What the user actually typed — "buy a laptop". Optional because goals created
+  /// straight through the API predate the composer and never had one.
+  title            String?
   goalType         String
   targetAmount     Float
   deadline         DateTime
   categoryTarget   String?
+  /// active | checking | completed | cancelled. "checking" is the window between the
+  /// composer submitting and the intent gate ruling on it.
   status           String   @default("active")
   simulationResult Json?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+
+  @@index([userId, status])
 }
 
 model StatementExtractedData {
@@ -215,9 +304,75 @@ model Verification {
   updatedAt  DateTime?
 }
 
+/// Which subscription plan a user is on.
+///
+/// **Deliberately its own model rather than a field on `User`.** That row is
+/// owned by better-auth's Prisma adapter, which creates it during signup from a
+/// fixed shape; a required field added there is a signup failure waiting to
+/// happen. Following the convention every domain model here already uses,
+/// `userId` is a plain `String` with no FK relation — the better-auth models use
+/// non-ObjectId string ids.
+///
+/// **No row means the free plan.** `resolvePlan()` in `src/config/plans.ts`
+/// treats absent and unrecognised identically, which is what lets this ship
+/// without a backfill over existing users, and what makes a plan id retired from
+/// the catalog degrade to free rather than 500 every request that user makes.
+///
+/// `status`, `endsAt` and `source` carry no logic today — nothing writes anything
+/// but `active`/`manual`. They exist because the shape of a subscription is
+/// well known and adding them later would mean touching every read; a payment
+/// provider's ids belong beside them when one is wired up.
+model Subscription {
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String    @unique
+  plan      String // PlanId — "first" | "glow" | "radiant"
+  status    String    @default("active") // active | cancelled
+  source    String    @default("manual") // manual | dev | <provider>
+  startedAt DateTime  @default(now())
+  endsAt    DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+/// Every answer a user has given at the Illuminate gate, append-only.
+///
+/// Deliberately NOT cascaded by `deleteStatement` — an audit log a delete erases
+/// is not an audit log. That is also why the relation is optional and why
+/// `bankName`/`rawRowCount` are copied in rather than read through: the row has
+/// to stay meaningful after the statement it describes is gone.
+///
+/// One statement can have several rows. Declining and later approving is a
+/// supported path, and both answers are kept in order; `StatementMetadata.gateDecision`
+/// holds only the latest.
+model StatementGateDecision {
+  id                  String             @id @default(auto()) @map("_id") @db.ObjectId
+  statementMetadataId String?            @db.ObjectId
+  statementMetadata   StatementMetadata? @relation(fields: [statementMetadataId], references: [id])
+  userId              String
+  decision            String // "approved" | "declined" | "discarded"
+  reason              String?
+  bankName            String?
+  rawRowCount         Int?
+  decidedAt           DateTime           @default(now())
+  createdAt           DateTime           @default(now())
+}
+
 model StatementMetadata {
   id                     String                   @id @default(auto()) @map("_id") @db.ObjectId
   userId                 String?
+  /// The name of the PDF as the user uploaded it, sanitised for display only.
+  /// The file on disk is a UUID and is deleted when phase 1 ends, so this is the
+  /// only thing tying a row back to the file someone chose — and it is frozen at
+  /// upload, so renaming the PDF afterwards changes nothing here. Never a path:
+  /// see `displayFileName` in statements.service.ts. Nullable for rows uploaded
+  /// before it existed.
+  fileName               String?
+  /// The upload's basename in `uploads/`, kept ONLY while a statement is waiting
+  /// on a PDF password — the one failure the user can fix, and the one case where
+  /// deleting the file would force a re-upload to supply it. Cleared (and the file
+  /// removed) when extraction succeeds or the statement is deleted. Never returned
+  /// by the API: see `publicStatement` in statements.service.ts.
+  retainedFile           String?
   bankName               String
   accountNumber          String?
   statementPeriodStart   DateTime?
@@ -227,9 +382,22 @@ model StatementMetadata {
   extractedData          StatementExtractedData?
   totalTransactions      Int?
   exceptionCount         Int?
-  normalizerStatus       String                   @default("Processing") // "Processing" | "Completed" | "Error"
+  /// Rows read straight out of the PDF, before normalisation drops any. This is
+  /// what the extraction receipt shows at the gate — `totalTransactions` only
+  /// lands at the end of the normalizer subgraph, long after the user has decided.
+  rawRowCount            Int?
+  /// Which extraction path ran. Not cosmetic: the image path carries its rows in
+  /// graph state and skips the key mapper, so phase 2 has to know to reload them.
+  isImageBased           Boolean                  @default(false)
+  extractionStatus       String                   @default("Processing") // "Processing" | "Completed" | "Error"
+  normalizerStatus       String                   @default("Not Started") // "Not Started" | "Processing" | "Completed" | "Error"
   categorizationStatus   String                   @default("Not Started") // "Not Started" | "Processing" | "Completed" | "Error"
   insightsStatus         String                   @default("Not Started") // "Not Started" | "Processing" | "Completed" | "Error"
+  /// The user's current answer at the gate. Denormalised from the latest
+  /// `StatementGateDecision` so "how many are waiting" is one indexed query.
+  gateDecision           String                   @default("pending") // "pending" | "approved" | "declined"
+  gateDecisions          StatementGateDecision[]
+  extractionError        String?
   normalizerError        String?
   insightsError          String?
   transactions           FinalTransactionData[]

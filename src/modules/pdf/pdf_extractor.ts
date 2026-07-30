@@ -3,11 +3,36 @@ import fs from "fs";
 
 const NUM_LINES_TO_CHECK_FOR_HEADER = 5;
 
-const unlockDoc = (doc: ReturnType<ReturnType<typeof mupdf.Document.openDocument>["asPDF"]>, pdfPath: string, password?: string) => {
+/**
+ * The one extraction failure the *user* can fix.
+ *
+ * A distinct type because the worker treats it differently from every other
+ * error: the uploaded file is kept rather than deleted, so the retry can be one
+ * password field instead of a re-upload. `isPdfPasswordError` rather than
+ * `instanceof` at the call site — the throw crosses a LangGraph node boundary,
+ * and matching the name as well costs nothing if a future version ever wraps it.
+ *
+ * **The message deliberately no longer contains the path.** It is stored on
+ * `extractionError` and rendered to the user, and an absolute server path is
+ * neither useful to them nor ours to publish. The wording still carries
+ * "incorrect or missing password", which is what the UI matches on.
+ */
+export class PdfPasswordError extends Error {
+    constructor() {
+        super("Incorrect or missing password for this PDF.");
+        this.name = "PdfPasswordError";
+    }
+}
+
+export function isPdfPasswordError(err: unknown): boolean {
+    return err instanceof PdfPasswordError || (err instanceof Error && err.name === "PdfPasswordError");
+}
+
+const unlockDoc = (doc: ReturnType<ReturnType<typeof mupdf.Document.openDocument>["asPDF"]>, _pdfPath: string, password?: string) => {
     if (!doc) return;
     if (doc.needsPassword()) {
         const authenticated = doc.authenticatePassword(password ?? "");
-        if (!authenticated) throw new Error(`Incorrect or missing password for PDF: ${pdfPath}`);
+        if (!authenticated) throw new PdfPasswordError();
     }
 };
 

@@ -30,8 +30,35 @@ const descriptionCleaner = (description: string): string => {
 
 const CLUSTER_BATCH_SIZE = 5;
 
+/**
+ * Restricts the approximate-nearest-neighbour search to one user's vectors.
+ *
+ * This is a `filter` inside `$vectorSearch`, not a `$match` after it, and the
+ * difference is not cosmetic. `$vectorSearch` returns its `numCandidates` best
+ * matches across the **whole collection** and only then hands them to the rest of
+ * the pipeline — so with several users in the database, another tenant's similar
+ * descriptions consume the candidate budget and genuine matches from this user's
+ * pool get crowded out before any later stage can see them. Filtering inside the
+ * search means the ANN traversal never considers them at all.
+ *
+ * Requires `userId` to be declared as a `filter` field on the Atlas index — see
+ * `src/seeds/create_vector_search_index.ts`. Without that declaration Atlas
+ * rejects the query rather than silently ignoring the filter, which is the
+ * failure mode we want.
+ */
+const vectorSearchStage = (queryVector: number[], userId: string, numCandidates: number) => ({
+    '$vectorSearch': {
+        'index': process.env.TRAN_VECTOR_INDEX_NAME,
+        'path': 'descriptionVector',
+        'queryVector': queryVector,
+        'numCandidates': numCandidates,
+        'limit': numCandidates,
+        'filter': { 'userId': { '$eq': userId } },
+    },
+});
+
 // ── Fresh clustering for first upload of a bank (0.9 threshold) ───────────────
-const performDescriptionClustering = async (transactions: TxnVector[], bankName: string) => {
+const performDescriptionClustering = async (transactions: TxnVector[], bankName: string, userId: string) => {
     if (!process.env.TRAN_VECTOR_INDEX_NAME) throw new Error("TRAN_VECTOR_INDEX_NAME env var is not set");
 
     let descriptionPool = transactions;
@@ -57,7 +84,7 @@ const performDescriptionClustering = async (transactions: TxnVector[], bankName:
         while (true) {
             searchResult = await prisma.finalTransactionData.aggregateRaw({
                 pipeline: [
-                    { '$vectorSearch': { 'index': process.env.TRAN_VECTOR_INDEX_NAME, 'path': 'descriptionVector', 'queryVector': seedTransaction.descriptionVector, 'numCandidates': numCandidates, 'limit': numCandidates } },
+                    vectorSearchStage(seedTransaction.descriptionVector, userId, numCandidates),
                     { '$match': { '_id': { '$in': poolIds } } },
                     { '$project': { '_id': 1, 'description': 1, 'similarity': { '$meta': 'vectorSearchScore' } } },
                 ],
@@ -86,6 +113,7 @@ const performDescriptionClustering = async (transactions: TxnVector[], bankName:
         await Promise.all(batch.map(cluster =>
             prisma.cluster.create({
                 data: {
+                    userId,
                     transactions: { connect: cluster.transactionIds.map(id => ({ id })) },
                     clusterLength: cluster.transactionIds.length,
                     bankName,
@@ -101,17 +129,22 @@ const performDescriptionClustering = async (transactions: TxnVector[], bankName:
 };
 
 // ── Incremental clustering for subsequent uploads of same bank (0.6 threshold) ─
-const performIncrementalClustering = async (newTransactions: TxnVector[], bankName: string) => {
+const performIncrementalClustering = async (newTransactions: TxnVector[], bankName: string, userId: string) => {
     if (!process.env.TRAN_VECTOR_INDEX_NAME) throw new Error("TRAN_VECTOR_INDEX_NAME env var is not set");
 
-    // Build pool from existing clusters of this bank
+    // Build pool from this user's existing clusters for this bank.
+    //
+    // `userId` here is the single most important filter in the file. Scoped only
+    // by `bankName`, a second customer of the same bank would have their new
+    // transactions matched against — and attached to — the first customer's
+    // clusters, inheriting their merchant names and categories.
     const existingClusterIds = (await prisma.cluster.findMany({
-        where: { bankName },
+        where: { bankName, userId },
         select: { id: true },
     })).map(c => c.id);
 
     const existingTxns = await prisma.finalTransactionData.findMany({
-        where: { clusterId: { in: existingClusterIds } },
+        where: { clusterId: { in: existingClusterIds }, userId },
         select: { id: true, clusterId: true },
     });
 
@@ -134,7 +167,7 @@ const performIncrementalClustering = async (newTransactions: TxnVector[], bankNa
         while (true) {
             results = await prisma.finalTransactionData.aggregateRaw({
                 pipeline: [
-                    { '$vectorSearch': { 'index': process.env.TRAN_VECTOR_INDEX_NAME, 'path': 'descriptionVector', 'queryVector': txn.descriptionVector, 'numCandidates': numCandidates, 'limit': numCandidates } },
+                    vectorSearchStage(txn.descriptionVector, userId, numCandidates),
                     { '$match': { '_id': { '$in': poolIds } } },
                     { '$project': { '_id': 1, 'similarity': { '$meta': 'vectorSearchScore' } } },
                     { '$limit': 1 },
@@ -167,7 +200,7 @@ const performIncrementalClustering = async (newTransactions: TxnVector[], bankNa
     // Unmatched transactions: cluster among themselves — may form new multi-clusters or singletons
     if (singletons.length > 0) {
         console.log(`[Cluster Tool] ${singletons.length} unmatched — running fresh clustering among themselves...`);
-        await performDescriptionClustering(singletons, bankName);
+        await performDescriptionClustering(singletons, bankName, userId);
     }
 
     console.log(`[Cluster Tool] Done — ${newTransactions.length - singletons.length} assigned to existing clusters, ${singletons.length} went to fresh clustering`);
@@ -175,8 +208,9 @@ const performIncrementalClustering = async (newTransactions: TxnVector[], bankNa
 
 // ── Tool ──────────────────────────────────────────────────────────────────────
 const clusterGeneratorTool = tool(async (input) => {
-    const { statementMetadataId } = input;
+    const { statementMetadataId, userId } = input;
     if (!statementMetadataId) throw new Error("statementMetadataId is required for cluster generation.");
+    if (!userId) throw new Error("userId is required for cluster generation.");
 
     const metadata = await prisma.statementMetadata.findUnique({
         where: { id: statementMetadataId },
@@ -200,6 +234,7 @@ const clusterGeneratorTool = tool(async (input) => {
 
     await prisma.finalTransactionData.createMany({
         data: normalizedTransactions.map((t, index) => ({
+            userId,
             date: t.date,
             creditAmount: t.creditAmount,
             debitAmount: t.debitAmount,
@@ -211,19 +246,22 @@ const clusterGeneratorTool = tool(async (input) => {
     });
 
     const newTxns = await prisma.finalTransactionData.findMany({
-        where: { statementMetadataId },
+        where: { statementMetadataId, userId },
         select: { id: true, description: true, descriptionVector: true },
     });
     console.log(`[Cluster Tool] ${newTxns.length} transactions ready for clustering`);
 
-    const existingClusterCount = await prisma.cluster.count({ where: { bankName } });
+    // "Fresh vs incremental" is a question about *this user's* history with the
+    // bank. Counting globally would put the very first upload of a second user
+    // straight into incremental mode against clusters they have never seen.
+    const existingClusterCount = await prisma.cluster.count({ where: { bankName, userId } });
 
     if (existingClusterCount > 0) {
         console.log(`[Cluster Tool] Existing clusters found for bank "${bankName}" — incremental mode`);
-        await performIncrementalClustering(newTxns, bankName).catch(console.error);
+        await performIncrementalClustering(newTxns, bankName, userId).catch(console.error);
     } else {
         console.log(`[Cluster Tool] No existing clusters for bank "${bankName}" — fresh clustering`);
-        await performDescriptionClustering(newTxns, bankName).catch(console.error);
+        await performDescriptionClustering(newTxns, bankName, userId).catch(console.error);
     }
 
     return true;
@@ -233,6 +271,7 @@ const clusterGeneratorTool = tool(async (input) => {
         description: `Embeds transaction descriptions, saves to FinalTransactionData, and clusters by similarity. Reads from NormalizedTransactions by statementMetadataId.`,
         schema: z.object({
             statementMetadataId: z.string().optional().describe("ID of the StatementMetadata record for this upload"),
+            userId: z.string().optional().describe("Owner of the statement — scopes clustering and the vector search"),
         }),
     }
 );

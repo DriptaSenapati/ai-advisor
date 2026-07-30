@@ -41,3 +41,6 @@ test.json
 
 # PDF files
 *.pdf
+
+# Runtime logs — local paths, document ids and pipeline output from real statements
+*.log

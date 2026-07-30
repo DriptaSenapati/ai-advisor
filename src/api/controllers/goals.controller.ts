@@ -6,7 +6,9 @@ import type { AuthenticatedRequest } from "../middleware/authenticate.js";
 export async function listGoals(req: Request, res: Response, next: NextFunction) {
     try {
         const userId = (req as AuthenticatedRequest).user.id;
-        const { status } = (req.query as unknown) as { status: "active" | "completed" | "all" };
+        const { status } = (req.query as unknown) as {
+            status: "active" | "checking" | "completed" | "all";
+        };
         const goals = await goalsService.listGoalsByStatus(userId, status);
         ok(res, goals);
     } catch (err) {
@@ -14,6 +16,13 @@ export async function listGoals(req: Request, res: Response, next: NextFunction)
     }
 }
 
+/**
+ * Creates the goal **and** queues its analysis — `createNewGoal` does both.
+ *
+ * A goal carrying a `title` comes back as `status: "checking"`: the intent gate has not ruled
+ * yet, and if it rejects, this row is deleted. The client learns which way it went from the
+ * SSE stream (`goal_done` or `goal_blocked`), not from this response.
+ */
 export async function createGoal(req: Request, res: Response, next: NextFunction) {
     try {
         const userId = (req as AuthenticatedRequest).user.id;
@@ -61,8 +70,9 @@ export async function analyzeGoal(req: Request, res: Response, next: NextFunctio
     try {
         const userId = (req as AuthenticatedRequest).user.id;
         const id = req.params["id"] as string;
+        const { force } = (req.body ?? {}) as { force?: boolean };
         await goalsService.getGoalById(id, userId);
-        await goalsService.scheduleGoalAnalysis(id, userId);
+        await goalsService.scheduleGoalAnalysis(id, userId, force);
         accepted(res, { jobStarted: true, goalId: id });
     } catch (err) {
         next(err);

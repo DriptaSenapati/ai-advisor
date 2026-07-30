@@ -2,7 +2,7 @@ import { Router } from "express";
 import * as goalsController from "../controllers/goals.controller.js";
 import { validate } from "../middleware/validate.js";
 import { analyzeLimiter } from "../middleware/rateLimiter.js";
-import { createGoalSchema, updateGoalSchema, listGoalsQuerySchema } from "../validators/goals.validator.js";
+import { createGoalSchema, updateGoalSchema, listGoalsQuerySchema, analyzeGoalSchema } from "../validators/goals.validator.js";
 
 const router = Router();
 
@@ -15,7 +15,7 @@ const router = Router();
  *     parameters:
  *       - in: query
  *         name: status
- *         schema: { type: string, enum: [active, completed, all], default: active }
+ *         schema: { type: string, enum: [active, checking, completed, all], default: active }
  *     responses:
  *       200:
  *         description: Goal list
@@ -34,8 +34,15 @@ router.get("/", validate(listGoalsQuerySchema, "query"), goalsController.listGoa
  *         application/json:
  *           schema:
  *             type: object
- *             required: [goalType, targetAmount, deadline]
+ *             required: [targetAmount, deadline]
  *             properties:
+ *               title:
+ *                 type: string
+ *                 example: "A new laptop"
+ *                 description: >
+ *                   Free text from the goal composer. When present the intent gate screens it
+ *                   and derives goalType and categoryTarget, so neither needs to be sent.
+ *                   Either title or goalType is required.
  *               goalType:
  *                 type: string
  *                 enum: [save_amount, reduce_category, emergency_fund, debt_payoff]
@@ -49,13 +56,21 @@ router.get("/", validate(listGoalsQuerySchema, "query"), goalsController.listGoa
  *               categoryTarget:
  *                 type: string
  *                 description: Required when goalType is reduce_category
+ *               force:
+ *                 type: boolean
+ *                 description: Simulate even on stale statements. Ignored in production.
  *     responses:
  *       201:
- *         description: Goal created
+ *         description: Goal created and analysis queued
  *       400:
  *         $ref: '#/components/responses/ValidationError'
+ *       429:
+ *         description: Analysis limit (10/hour) exceeded
  */
-router.post("/", validate(createGoalSchema), goalsController.createGoal);
+// Rate-limited like `/analyze`, because it *is* an analysis: creating a goal now costs one
+// LLM call plus a ~460,000-iteration simulation. An unlimited create would be a free door
+// around the limit on the endpoint next to it.
+router.post("/", analyzeLimiter, validate(createGoalSchema), goalsController.createGoal);
 
 /**
  * @openapi
@@ -144,6 +159,6 @@ router.delete("/:id", goalsController.deleteGoal);
  *       429:
  *         $ref: '#/components/responses/RateLimited'
  */
-router.post("/:id/analyze", analyzeLimiter, goalsController.analyzeGoal);
+router.post("/:id/analyze", analyzeLimiter, validate(analyzeGoalSchema), goalsController.analyzeGoal);
 
 export default router;

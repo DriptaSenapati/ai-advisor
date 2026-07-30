@@ -25,6 +25,7 @@
 
 import "../envConfig.js";
 
+import { DEV_USER_ID } from "../config/dev-user.js";
 const CHECKPOINT_DB = "./dev-checkpoints.sqlite";
 const PDF_PATH = "assets\\hsbc_Statement_2.pdf";
 
@@ -57,7 +58,9 @@ async function runAdvisor() {
     if (fromStage === "llm") {
         console.log("[llm] Re-running LLM categorization on existing clusters...");
         const { llmCategoryNode } = await import("../modules/nodes/transaction_category_nodes/llm_category_node.js");
-        const minState = { statementPath: "", messages: [], errorData: { errorRows: [] }, transactionData: [], exceptions: [], finalTransactionData: [] };
+        // `userId` matters here — `llmCategoryNode` reads it to scope which
+        // clusters it categorises. Without it the node would find none.
+        const minState = { userId: DEV_USER_ID, statementPath: "", messages: [], errorData: { errorRows: [] }, transactionData: [], exceptions: [], finalTransactionData: [] };
         await llmCategoryNode(minState as any, {});
         return;
     }
@@ -71,7 +74,7 @@ async function runAdvisor() {
 
     if (fromStage === "pdf") {
         console.log("[advisor] Full advisor run...");
-        await agent.invoke({ statementPath: PDF_PATH, messages: [] }, threadConfig);
+        await agent.invoke({ userId: DEV_USER_ID, statementPath: PDF_PATH, messages: [] }, threadConfig);
         return;
     }
 
@@ -92,7 +95,7 @@ async function runAdvisor() {
 
     console.log(`[${fromStage}] Resuming advisor from checkpoint before "${targetNode}"...`);
     await agent.invoke(
-        { statementPath: PDF_PATH, messages: [], bankName: "Kotak" },
+        { userId: DEV_USER_ID, statementPath: PDF_PATH, messages: [], bankName: "Kotak" },
         { configurable: { thread_id: ADVISOR_THREAD_ID, checkpoint_id: resumeCheckpointId } }
     );
 }
@@ -132,10 +135,10 @@ async function runInsights() {
     if (!fromStage) {
         if (isFullRecompute) {
             console.log("[insights] Full recompute — all months across all banks...");
-            await agent.invoke({ messages: [] }, threadConfig);
+            await agent.invoke({ userId: DEV_USER_ID, messages: [] }, threadConfig);
         } else {
             console.log(`[insights] Per-statement run — metadataId=${metadataIdArg}...`);
-            await agent.invoke({ messages: [], statementMetadataId: metadataIdArg }, threadConfig);
+            await agent.invoke({ userId: DEV_USER_ID, messages: [], statementMetadataId: metadataIdArg }, threadConfig);
         }
         return;
     }
@@ -161,7 +164,7 @@ async function runInsights() {
     const resumeLabel = isFullRecompute ? "full recompute" : `metadataId=${metadataIdArg}`;
     console.log(`[insights:${fromStage}] Resuming (${resumeLabel}) from checkpoint before "${targetNode}"...`);
     await agent.invoke(
-        { messages: [], ...(metadataIdArg ? { statementMetadataId: metadataIdArg } : {}) },
+        { userId: DEV_USER_ID, messages: [], ...(metadataIdArg ? { statementMetadataId: metadataIdArg } : {}) },
         { configurable: { thread_id: threadId, checkpoint_id: resumeCheckpointId } }
     );
 }
@@ -200,7 +203,7 @@ async function runFull() {
     console.log("[full] Running advisor graph...");
     const advisorAgent = advisorAgentGraph.compile({ checkpointer });
     const advisorResult = await advisorAgent.invoke(
-        { statementPath: PDF_PATH, messages: [] },
+        { userId: DEV_USER_ID, statementPath: PDF_PATH, messages: [] },
         { configurable: { thread_id: ADVISOR_THREAD_ID } }
     );
 
@@ -213,7 +216,7 @@ async function runFull() {
     console.log(`\n[full] Running insights graph for statementMetadataId=${statementMetadataId}...`);
     const insightsAgent = insightsAgentGraph.compile({ checkpointer });
     await insightsAgent.invoke(
-        { statementMetadataId, messages: [] },
+        { userId: DEV_USER_ID, statementMetadataId, messages: [] },
         { configurable: { thread_id: INSIGHTS_THREAD_ID } }
     );
     console.log("[full] Done.");

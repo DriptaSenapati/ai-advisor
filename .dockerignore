@@ -1,0 +1,31 @@
+# Rebuilt inside the image
+node_modules
+build
+
+# CRITICAL: the committed client carries a *Windows* query engine
+# (query_engine-windows.dll.node). Copying it in would shadow the Linux engine
+# that `prisma generate` produces during the build, and the container would die
+# on its first query. The image always generates its own.
+src/generated
+
+# Runtime state, not build input
+uploads
+dev-checkpoints.sqlite
+
+# Secrets — supplied at run time via env_file / the orchestrator, never baked in
+.env
+.env.*
+
+# Local noise and sample data that would otherwise bloat the build context
+.git
+.vscode
+.claude
+*.md
+assets
+charts
+generated-videos
+extracted_data.json
+hdfc_output.json
+my_output.json
+runu_output.json
+output-polygon.pdf

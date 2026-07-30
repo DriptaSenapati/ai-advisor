@@ -10,7 +10,7 @@ const tranRecurringToolNode: GraphNode<typeof insightsAgentGraphSchema> = async 
         return state;
     }
 
-    await recurringPatternTool.invoke({ affectedMonths });
+    await recurringPatternTool.invoke({ affectedMonths, userId: state.userId });
     return state;
 }
 
