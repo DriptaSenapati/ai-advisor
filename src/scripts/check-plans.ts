@@ -97,6 +97,14 @@ function catalogChecks(): void {
 }
 
 /** Keys a plan without `insights_full` must never receive. */
+/**
+ * Sections no depth below `full` may return.
+ *
+ * **`recommendations` is deliberately not in this list any more.** It survives at both
+ * shallower depths now — trimmed to one at `headline` — because the overview is
+ * recommendation-first on every plan. What must never leak is the prose and the narrated
+ * flags, which is what these nine were always really about.
+ */
 const WITHHELD = [
     "spendingAnalysis",
     "trendAndComparison",
@@ -106,7 +114,6 @@ const WITHHELD = [
     "behavioralInsights",
     "incomeAnalysis",
     "redFlags",
-    "recommendations",
 ];
 
 async function projectionChecks(): Promise<void> {
@@ -123,15 +130,22 @@ async function projectionChecks(): Promise<void> {
         return;
     }
 
-    const full = (await insightsService.getLatestInsight(owner.userId, true)) as Record<string, unknown>;
-    const cut = (await insightsService.getLatestInsight(owner.userId, false)) as Record<string, unknown>;
+    const full = (await insightsService.getLatestInsight(owner.userId, "full")) as Record<string, unknown>;
+    const cut = (await insightsService.getLatestInsight(owner.userId, "summary")) as Record<string, unknown>;
+    const headline = (await insightsService.getLatestInsight(owner.userId, "headline")) as Record<string, unknown>;
 
     const fullInsights = (full.insights ?? {}) as Record<string, unknown>;
     const cutInsights = (cut.insights ?? {}) as Record<string, unknown>;
+    const headlineInsights = (headline.insights ?? {}) as Record<string, unknown>;
 
     check("full read is not marked redacted", full.redacted === undefined);
     check("cut read is marked redacted", cut.redacted === true);
     check("cut read names the plan that unlocks it", cut.unlockedBy === minimumPlanFor("insights_full"));
+    check(
+        "headline read names the NEXT plan up, not the top one",
+        headline.unlockedBy === minimumPlanFor("insights_summary"),
+        "pointing a free user straight at Radiant skips the plan that actually answers their next question"
+    );
 
     check(
         "keySummary survives the cut",
@@ -152,6 +166,105 @@ async function projectionChecks(): Promise<void> {
         leaked.length ? `leaked: ${leaked.join(", ")}` : undefined
     );
 
+    const leakedHeadline = WITHHELD.filter((k) => k in headlineInsights);
+    check(
+        `no withheld section survives the headline cut (${WITHHELD.length} checked)`,
+        leakedHeadline.length === 0,
+        leakedHeadline.length ? `leaked: ${leakedHeadline.join(", ")}` : undefined
+    );
+
+    /* ---- the three depths differ in the ways they are supposed to ---- */
+
+    const fullRecs = Array.isArray(fullInsights.recommendations) ? fullInsights.recommendations : null;
+    if (fullRecs && fullRecs.length > 0) {
+        const cutRecs = cutInsights.recommendations as unknown[] | undefined;
+        const headlineRecs = headlineInsights.recommendations as unknown[] | undefined;
+
+        check(
+            "summary keeps every recommendation",
+            Array.isArray(cutRecs) && cutRecs.length === fullRecs.length,
+            "the ranked list is what insights_summary sells"
+        );
+        check(
+            "headline keeps exactly one recommendation",
+            Array.isArray(headlineRecs) && headlineRecs.length === Math.min(1, fullRecs.length),
+            "the free plan gets the top move, not the list"
+        );
+    } else {
+        console.log("  — report has no recommendations, so the depth-trim checks are skipped.");
+    }
+
+    /**
+     * The forecast is the paid thing; the per-recommendation scalars are not.
+     *
+     * `impact`, `annualImpact` and `confidence` live inside `recoveryProjection`, and they are
+     * what a *card* prints — so stripping the whole object took them with it and left a Glow
+     * user with three recommendations carrying no yearly figure and no confidence, while the
+     * pricing page promised exactly those. Both shallow depths therefore keep the scalars and
+     * lose every series.
+     */
+    const seriesKeys = ["p50"];
+    const forecastKeys = [
+        "historyMonths",
+        "actualCumulative",
+        "forecastMonths",
+        "baselineP10",
+        "baselineP50",
+        "baselineP90",
+        "planP50",
+    ];
+
+    for (const [label, report] of [["summary", cut], ["headline", headline]] as const) {
+        const proj = (report.chartData as Record<string, unknown> | null)?.recoveryProjection as
+            | Record<string, unknown>
+            | undefined;
+
+        if (!proj) {
+            console.log(`  — ${label} has no recoveryProjection to check (report predates it).`);
+            continue;
+        }
+
+        check(
+            `${label} keeps the per-recommendation figures the cards print`,
+            Array.isArray(proj.perRecommendation),
+            "confidence and annualImpact live here; without them the cards contradict the pricing page"
+        );
+
+        const leakedSeries = (proj.perRecommendation as Record<string, unknown>[]).some((p) =>
+            seriesKeys.some((k) => k in p)
+        );
+        check(`${label} drops every per-recommendation forecast path`, !leakedSeries);
+
+        const drawable = forecastKeys.filter(
+            (k) => Array.isArray(proj[k]) && (proj[k] as unknown[]).length > 0
+        );
+        check(
+            `${label} sends nothing that could be plotted`,
+            drawable.length === 0,
+            drawable.length ? `still populated: ${drawable.join(", ")}` : undefined
+        );
+
+        check(
+            `${label} reports isProjectable false, so no chart is attempted`,
+            proj.isProjectable === false
+        );
+    }
+
+    check(
+        "headline carries the projection scalars and nothing else from chartData",
+        Object.keys((headline.chartData ?? {}) as object).every((k) => k === "recoveryProjection"),
+        "every other panel it would feed is a paid screen, and /transactions/summary already backs the free dashboard"
+    );
+
+    /* ---- the score survives every depth ---- */
+    for (const [label, report] of [["full", full], ["summary", cut], ["headline", headline]] as const) {
+        check(
+            `${label} read keeps the score columns`,
+            "healthScore" in report && "riskLevel" in report && "scoreDelta" in report,
+            "the score is the overview's headline on every plan, and it is our arithmetic rather than the model's"
+        );
+    }
+
     check(
         "rawStatsSnapshot is dropped entirely",
         !("rawStatsSnapshot" in cut),
@@ -160,8 +273,9 @@ async function projectionChecks(): Promise<void> {
 
     const cutCharts = (cut.chartData ?? null) as Record<string, unknown> | null;
     check(
-        "recoveryProjection is stripped from chartData",
-        cutCharts === null || !("recoveryProjection" in cutCharts)
+        "summary keeps the rest of chartData intact",
+        cutCharts !== null && "monthlyOverview" in cutCharts,
+        "the Glow dashboard is built from it"
     );
 
     // The cut must still be a usable report, not an empty husk.
@@ -181,4 +295,20 @@ main()
         console.error(err);
         process.exitCode = 1;
     })
-    .finally(() => prisma.$disconnect());
+    .finally(async () => {
+        await prisma.$disconnect();
+        /**
+         * **Explicit exit, because `$disconnect()` alone does not end this process.**
+         *
+         * This script imports `insights.service.ts` for the real projection — that is the
+         * point of it — and that module imports `insightsQueue` from `queue/index.js`. A
+         * BullMQ `Queue` opens an ioredis connection at construction and holds it, so the
+         * event loop stays alive forever: the checks all ran, "All checks passed" printed,
+         * and the process then sat there. Anything that waits for the exit code (CI, a
+         * pre-commit hook, a shell wrapper that buffers output until exit) simply hung.
+         *
+         * Closing the queue instead would mean reaching into a module this script only
+         * borrows a type of. Exiting is the honest end of a read-only script.
+         */
+        process.exit(process.exitCode ?? 0);
+    });

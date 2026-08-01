@@ -46,8 +46,24 @@ export interface RecoveryProjection {
      * than the recommendation's own `monthlySavingImpact`. Stated rather than left to be
      * inferred from the series: the UI needs it to print a figure that agrees with the chart,
      * and back-solving it out of `p50[0]` would put a copy of this arithmetic in the browser.
+     *
+     * `annualImpact` is `impact × 12`, emitted rather than left to the client for the same
+     * reason every other figure here is precomputed — a multiplication in the browser is
+     * still a second implementation, and it is the *bounded* figure that must be multiplied,
+     * which is exactly the one a careless caller would get wrong.
+     *
+     * `confidence` is **an evidence score shown as a percentage, not a probability** — see
+     * {@link scoreConfidence}. Nothing here simulates anything, so it must never be rendered
+     * as "% chance of success"; it answers "how much of this rests on steady, repeated
+     * spending we can actually see".
      */
-    perRecommendation: { slug: string; p50: number[]; impact: number }[];
+    perRecommendation: {
+        slug: string;
+        p50: number[];
+        impact: number;
+        annualImpact: number;
+        confidence: number;
+    }[];
     /** Monthly surplus the baseline assumes, and what the full plan would make it. */
     monthlyBaseline: number;
     monthlyWithPlan: number;
@@ -111,6 +127,15 @@ export interface RecommendationImpact {
 export interface ImpactBounds {
     medianMonthlyExpenses: number;
     categoryMedians: Record<string, number>;
+    /**
+     * Monthly spend series per category, one entry per month the category actually appeared
+     * in — the evidence {@link scoreConfidence} is built from.
+     *
+     * Optional: a report generated without it still gets every series and every bound, and
+     * simply scores each recommendation at the neutral midpoint rather than inventing a
+     * number from data it does not have.
+     */
+    categorySeries?: Record<string, number[]>;
 }
 
 /**
@@ -136,6 +161,87 @@ function boundImpact(rec: RecommendationImpact, bounds: ImpactBounds): number {
         : bounds.medianMonthlyExpenses;
     if (ceiling <= 0) return claimed;
     return Math.min(claimed, ceiling);
+}
+
+/** Linear between two named thresholds, clamped to 0–1 outside them. */
+function factor(value: number, atZero: number, atOne: number): number {
+    if (atOne === atZero) return 1;
+    return Math.max(0, Math.min(1, (value - atZero) / (atOne - atZero)));
+}
+
+/** Floor and ceiling for the published figure. */
+const CONFIDENCE_FLOOR = 40;
+const CONFIDENCE_RANGE = 57;
+
+/**
+ * How much of a recommendation rests on steady, repeated spending we can actually see.
+ *
+ * ---
+ *
+ * **This is not a probability, and it is deliberately not a simulation.** The goal advisor
+ * earns its per-suggestion confidence by re-running 5,000 Monte Carlo paths with the action
+ * applied, because a goal has a target and a deadline to be feasible *against*. A recovery
+ * projection has neither — it compares two trajectories — and the docblock at the top of this
+ * file is explicit that closed-form arithmetic answers that exactly and a simulation here
+ * would cost seconds per report to say nothing more. Bolting Monte Carlo on for a percentage
+ * would contradict a decision this file already made and paid for.
+ *
+ * So the figure is an **evidence score**: four measurable properties of the user's own
+ * history, weighted, mapped onto a percentage. Every input is a fact already on disk.
+ *
+ * | Input | Weight | Reads as |
+ * |---|---|---|
+ * | not clamped | 0.35 | the model's claim survived the ceiling `boundImpact` imposes |
+ * | steady category | 0.25 | low coefficient of variation — a predictable thing to cut |
+ * | months of evidence | 0.20 | the category appears in most months, not two of twelve |
+ * | headroom | 0.20 | the saving is a small share of what usually flows through it |
+ *
+ * **Bounded to 40–97, never 0–100.** A recommendation the pipeline chose to publish is not
+ * 3% credible, and printing that would read as a bug rather than as caution; nothing here is
+ * certain either, so the top is short of 100. The floor also keeps the number honest about
+ * what it is — a 40 means "we can see very little supporting this", not "this will fail".
+ *
+ * A recommendation with no `category` scores the two category-dependent factors at their
+ * midpoint. It is usually the cross-cutting advice (dispute a charge, move idle cash) whose
+ * evidence genuinely does not live in one category's series.
+ */
+export function scoreConfidence(
+    rec: RecommendationImpact,
+    impact: number,
+    claimed: number,
+    bounds: ImpactBounds,
+    totalMonths: number,
+): number {
+    const wasClamped = impact < claimed;
+    const notClamped = wasClamped ? 0 : 1;
+
+    const series = rec.category ? bounds.categorySeries?.[rec.category] : undefined;
+
+    // Steadiness: CV of the category's monthly spend. A subscription billed identically every
+    // month scores 1; a category driven by occasional large purchases scores near 0.
+    let steady = 0.5;
+    if (series && series.length >= 2) {
+        const { mean, std } = computeStats(series);
+        steady = mean > 0 ? factor(std / mean, 1, 0.25) : 0.5;
+    }
+
+    // Evidence: how much of the window this category actually appears in. Two months out of
+    // twelve is a coincidence; nine is a habit.
+    const evidence = series && totalMonths > 0
+        ? factor(series.length / totalMonths, 0.25, 0.75)
+        : 0.5;
+
+    // Headroom: saving 10% of what a category usually costs is plausible, 90% is a promise
+    // about behaviour rather than a reading of the data.
+    const ceiling = rec.category
+        ? bounds.categoryMedians[rec.category] ?? bounds.medianMonthlyExpenses
+        : bounds.medianMonthlyExpenses;
+    const headroom = ceiling > 0 ? factor(impact / ceiling, 0.75, 0.15) : 0.5;
+
+    const weighted =
+        0.35 * notClamped + 0.25 * steady + 0.20 * evidence + 0.20 * headroom;
+
+    return Math.round(CONFIDENCE_FLOOR + CONFIDENCE_RANGE * weighted);
 }
 
 /**
@@ -188,11 +294,16 @@ export function buildRecoveryProjection(
 
     // Bound every claim before any of it reaches a series, so the cards and the chart cannot
     // tell different stories.
-    const bounded = recommendations.map(r => ({
-        slug: r.slug,
-        impact: boundImpact(r, bounds),
-        claimed: Math.max(0, r.monthlySavingImpact),
-    }));
+    const bounded = recommendations.map(r => {
+        const impact = boundImpact(r, bounds);
+        const claimed = Math.max(0, r.monthlySavingImpact);
+        return {
+            slug: r.slug,
+            impact,
+            claimed,
+            confidence: scoreConfidence(r, impact, claimed, bounds, monthly.length),
+        };
+    });
     const clampedSlugs = bounded.filter(b => b.impact < b.claimed).map(b => b.slug);
 
     const totalImpact = bounded.reduce((s, b) => s + b.impact, 0);
@@ -211,6 +322,8 @@ export function buildRecoveryProjection(
         slug: b.slug,
         p50: cumulativePath(anchor, monthlyBaseline + b.impact, FORECAST_MONTHS),
         impact: Math.round(b.impact),
+        annualImpact: Math.round(b.impact * FORECAST_MONTHS),
+        confidence: b.confidence,
     }));
 
     return {

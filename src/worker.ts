@@ -4,6 +4,7 @@ import { Worker, type Job } from "bullmq";
 import { connection } from "./queue/connection.js";
 import {
     insightsQueue,
+    goalQueue,
     publish,
     type ExtractJobData,
     type PdfJobData,
@@ -21,6 +22,7 @@ import { runInsightsPipeline } from "./api/services/insights.service.js";
 import { triggerGoalAnalysis } from "./modules/goalManager.js";
 import { planIdFor } from "./api/middleware/entitlement.js";
 import { jobPriorityFor } from "./config/plans.js";
+import prisma from "./prismaClient.js";
 
 const workerOpts = { connection };
 
@@ -217,6 +219,60 @@ pdfWorker.on("failed", async (job, err) => {
     console.error(`[Worker] pdf.process failed (attempt ${job?.attemptsMade}):`, err.message);
 });
 
+/**
+ * Re-run every active goal's simulation after the account's derived data changes.
+ *
+ * A goal's `simulationResult` is a snapshot — Monte Carlo over `MonthlyStats` and
+ * `RecurringPattern` as they stood at the moment someone pressed "analyze". A new
+ * statement rewrites both (new months, shifted rolling averages, a changed income
+ * floor), and until this the simulation just sat there unrefreshed: correct for
+ * data that no longer exists, with nothing on `/goals` or the goal detail page
+ * to say so.
+ *
+ * **Called only for a per-statement `insights.generate` run, never a full
+ * recompute.** A full recompute (`POST /insights/generate` with no
+ * `statementId`) re-derives the same report from `MonthlyStats`/`RecurringPattern`
+ * that have not changed — a "Regenerate" click, or the dev plan switcher's
+ * re-read — so triggering ten thousand Monte Carlo iterations per active goal
+ * off it would be a full re-simulation of numbers nothing moved. Only a real
+ * statement finishing is "the derived data just moved"; the caller guards this
+ * on `statementId` being present.
+ *
+ * **`checking` goals are skipped.** They have no simulation yet and may still be
+ * deleted by the intent gate; re-analysing one would race that gate's own
+ * `goal.analyze` job for the same row. `completed`/`cancelled` are skipped
+ * because nothing about them is meant to keep moving.
+ *
+ * Each job goes through the same queue, same priority rule and same
+ * `allowStaleData` resolution as a manual "Re-analyze" click — this is not a
+ * separate code path, only a different trigger for the existing one.
+ */
+async function requeueActiveGoals(userId: string): Promise<void> {
+    const goals = await prisma.goal.findMany({
+        where: { userId, status: "active" },
+        select: { id: true },
+    });
+    if (goals.length === 0) return;
+
+    const priority = jobPriorityFor(await planIdFor(userId));
+    for (const g of goals) {
+        await publish(userId, { stage: "goal_queued", goalId: g.id });
+        await goalQueue.add(
+            "goal.analyze",
+            { goalId: g.id, userId, allowStaleData: resolveAllowStaleData() },
+            { priority }
+        );
+    }
+}
+
+/** Mirrors `goals.service.ts`'s `resolveAllowStaleData(force?)` with no per-call
+    `force` — an automatic refresh is never the forced path, only the env-level
+    local-fixture default. Duplicated rather than imported: the service module
+    pulls in Express-only middleware the worker process has no business loading. */
+function resolveAllowStaleData(): boolean {
+    return process.env["GOAL_SIM_ALLOW_STALE_DATA"] === "true";
+}
+
 // --- Insights generation worker ---
 const insightsWorker = new Worker<InsightsJobData>(
     "insights.generate",
@@ -231,6 +287,27 @@ const insightsWorker = new Worker<InsightsJobData>(
 
         if (statementId) await publishStatementProgress(userId, statementId, "insights_done", 100);
         else await publish(userId, { stage: "insights_done", pct: 100 });
+
+        // Goals are re-simulated after insights, never before: the Monte Carlo
+        // engine reads `MonthlyStats`/`RecurringPattern` directly, and this is the
+        // point in the pipeline where both are guaranteed to reflect the new
+        // statement.
+        //
+        // **Only when this run came from a real statement**, i.e. `statementId`
+        // is present. A full recompute (`POST /insights/generate` with no
+        // `statementId` — the manual "Regenerate" button, or the dev plan
+        // switcher's re-read) re-derives the report from data that has not
+        // changed, so it must not spend a Monte Carlo run on every active goal
+        // for nothing. New numbers on disk is the trigger, not "the LLM wrote a
+        // new report about the same numbers".
+        //
+        // A failure here must not fail the insights job itself — the report just
+        // generated is real regardless of whether a goal refresh could be queued.
+        try {
+            if (statementId) await requeueActiveGoals(userId);
+        } catch (err) {
+            console.error("[Worker] failed to requeue goals after insights:", err);
+        }
     },
     { ...workerOpts, concurrency: 1 }
 );

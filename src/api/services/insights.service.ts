@@ -2,88 +2,200 @@ import prisma from "../../prismaClient.js";
 import { insightsAgentGraph } from "../../graph.js";
 import { NotFoundError, assertValidObjectId } from "../errors.js";
 import { insightsQueue, publish } from "../../queue/index.js";
-import { jobPriorityFor, minimumPlanFor, type PlanId } from "../../config/plans.js";
+import { hasFeature, jobPriorityFor, minimumPlanFor, type PlanId } from "../../config/plans.js";
 import { planIdFor } from "../middleware/entitlement.js";
 
 /**
- * The sections of `InsightReport.insights` a plan without `insights_full` may
- * read.
+ * How much of a report a plan may read. **Three depths, not two.**
  *
- * `keySummary` is the summary band on the dashboard and the header of
- * `/app/insights`; `dataQualityWarning` is a caveat about the reader's *own*
- * data and withholding it would be indefensible — a report that quietly omits
- * "18% of March is uncategorised" is worse than no report.
+ * The overview is the app's home screen and it is recommendation-first, so a two-depth
+ * projection would have made `/app` a locked panel for every free user — a home page that
+ * teaches nothing, on a plan whose whole job is to demonstrate the product. The middle
+ * ground is real: the free plan sees *what to do next*, the paid plans see the ranked list
+ * and then the argument behind it.
  *
- * Everything else — the seven prose sections, the narrated red flags, the
- * recommendations — is the Radiant product.
+ * | Depth | Feature | Reads as |
+ * |---|---|---|
+ * | `headline` | `insights_headline` (every plan) | the score, the key summary, and the single highest-impact move |
+ * | `summary` | `insights_summary` | + every recommendation with what each is worth, + `chartData` |
+ * | `full` | `insights_full` | + the seven prose sections, the narrated flags and the trajectory projection |
+ */
+export type ReportDepth = "headline" | "summary" | "full";
+
+/**
+ * Sections of `InsightReport.insights` that survive at *any* depth.
+ *
+ * `keySummary` is the summary band on the dashboard and the header of `/app/insights`;
+ * `dataQualityWarning` is a caveat about the reader's *own* data and withholding it would be
+ * indefensible — a report that quietly omits "18% of March is uncategorised" is worse than no
+ * report.
  */
 const SUMMARY_SECTIONS = ["keySummary", "dataQualityWarning"] as const;
 
-/** Keys of `chartData` that belong to the full report only. */
-const FULL_ONLY_CHART_KEYS = ["recoveryProjection"] as const;
+/**
+ * How many recommendations the headline depth returns.
+ *
+ * One, because `keySummary.actionItem` already names the top lever in prose at every tier —
+ * this only makes the same fact structured, so it can carry its rupee figure and its effort.
+ * Returning the whole ranked list here would leave `insights_summary` selling nothing.
+ */
+const HEADLINE_RECOMMENDATIONS = 1;
+
+/**
+ * Reduce the recovery projection to the figures without the forecast.
+ *
+ * **The chart is the Radiant product; the figures on the cards are not.** `confidence` and
+ * `annualImpact` live inside `perRecommendation` because that is where the bounded arithmetic
+ * happens — but they are what a *card* prints, and the pricing page promises Glow "every
+ * recommendation with what it is worth a year, how confident we are". Stripping the whole
+ * object took those with it, so a Glow user saw three recommendations with no yearly figure
+ * and no confidence, and the plan comparison advertised something the API had removed.
+ *
+ * So the series go and the scalars stay: no `p50`, no baselines, no months — nothing that
+ * could be plotted — and `isProjectable: false`, which is what stops the UI drawing a chart
+ * from arrays that are no longer there.
+ *
+ * **`isProjectable: false` now means two different things**, and the UI must tell them apart:
+ * "under three months of history" and "not on your plan". `redacted` is the discriminator, and
+ * the copy differs — telling a Glow user to regenerate a report would be advice that cannot
+ * work.
+ */
+function stripForecast(projection: Record<string, unknown>): Record<string, unknown> {
+    const perRecommendation = Array.isArray(projection.perRecommendation)
+        ? projection.perRecommendation.map((entry) => {
+              const { p50: _dropped, ...rest } = entry as Record<string, unknown>;
+              return rest;
+          })
+        : [];
+
+    return {
+        perRecommendation,
+        clampedSlugs: projection.clampedSlugs ?? [],
+        isProjectable: false,
+        historyMonths: [],
+        actualCumulative: [],
+        forecastMonths: [],
+        baselineP10: [],
+        baselineP50: [],
+        baselineP90: [],
+        planP50: [],
+        monthlyBaseline: 0,
+        monthlyWithPlan: 0,
+        gapAt12m: 0,
+        excludedDipMonths: [],
+    };
+}
 
 export interface RedactedReport {
     redacted: true;
-    /** Which plan returns the omitted sections. */
+    /** The cheapest plan that returns what was withheld — the *next* step up, not always the top. */
     unlockedBy: PlanId | null;
 }
 
+/** The depth a plan reads at. */
+export function depthFor(planId: string | null | undefined): ReportDepth {
+    if (hasFeature(planId, "insights_full")) return "full";
+    if (hasFeature(planId, "insights_summary")) return "summary";
+    return "headline";
+}
+
 /**
- * Cut a report down to what `plan` may see.
+ * Cut a report down to what `depth` may see.
  *
- * **This happens here, in the service, and not in the client.** The whole point
- * of the lock is that the withheld prose never crosses the wire — a UI that
- * hides sections it was sent is a lock anyone can open with the network tab.
+ * **This happens here, in the service, and not in the client.** The whole point of the lock
+ * is that the withheld prose never crosses the wire — a UI that hides sections it was sent is
+ * a lock anyone can open with the network tab.
  *
- * `rawStatsSnapshot` is dropped wholesale for the same reason: it is the
- * prose-formatted stats block assembled for the LLM prompt, so it restates most
- * of the report in a field nothing renders. Leaving it in place would hand back
- * exactly what the projection just removed.
+ * `rawStatsSnapshot` is dropped below `full` for the same reason: it is the prose-formatted
+ * stats block assembled for the LLM prompt, so it restates most of the report in a field
+ * nothing renders. Leaving it in place would hand back exactly what the projection removed.
+ *
+ * **The four score columns are never withheld.** They are the headline of the overview on
+ * every plan, and they are derived arithmetic over the user's own figures rather than LLM
+ * output — there is no version of this product where a paying tier owns the answer to "how am
+ * I doing". They ride along in `...rest` because they are real columns, not JSON.
  */
 function projectReport<T extends { insights: unknown; chartData?: unknown; rawStatsSnapshot?: unknown }>(
     report: T,
-    canReadFull: boolean
+    depth: ReportDepth
 ): T | (Omit<T, "rawStatsSnapshot"> & RedactedReport) {
-    if (canReadFull) return report;
+    if (depth === "full") return report;
 
     const { rawStatsSnapshot: _dropped, ...rest } = report;
 
     const insights = report.insights as Record<string, unknown> | null;
     const chartData = report.chartData as Record<string, unknown> | null | undefined;
 
+    const kept: Record<string, unknown> = insights
+        ? Object.fromEntries(
+              SUMMARY_SECTIONS.filter((k) => k in insights).map((k) => [k, insights[k]])
+          )
+        : {};
+
+    // Recommendations are already ordered by `monthlySavingImpact` descending, so "the top
+    // one" is a slice rather than a sort. Absent on reports generated before the field
+    // existed, which is why this is guarded rather than assumed.
+    if (insights && Array.isArray(insights.recommendations)) {
+        kept.recommendations =
+            depth === "headline"
+                ? insights.recommendations.slice(0, HEADLINE_RECOMMENDATIONS)
+                : insights.recommendations;
+    }
+
     return {
         ...rest,
-        insights: insights
-            ? Object.fromEntries(
-                  SUMMARY_SECTIONS.filter((k) => k in insights).map((k) => [k, insights[k]])
-              )
-            : insights,
-        chartData: chartData
-            ? Object.fromEntries(
-                  Object.entries(chartData).filter(
-                      ([k]) => !(FULL_ONLY_CHART_KEYS as readonly string[]).includes(k)
-                  )
-              )
-            : chartData,
+        insights: insights ? kept : insights,
+        // The headline depth carries no chartData at all. Every panel it feeds — the trend
+        // charts, the category ring, the rhythm grid — belongs to a paid screen, and
+        // `GET /transactions/summary` already backs the dashboard a free user *is* entitled
+        // to, so nothing is lost by withholding the duplicate.
+        /**
+         * **`headline` keeps the projection's scalars and nothing else.**
+         *
+         * Everything else in `chartData` — the monthly overview, the category breakdown, the
+         * merchants, the rhythm — feeds a paid screen, and `GET /transactions/summary`
+         * already backs the dashboard a free user *is* entitled to, so withholding the
+         * duplicate costs them nothing.
+         *
+         * The reduced `recoveryProjection` is different: it is where `impact`,
+         * `annualImpact` and `confidence` live, and those are what make the one
+         * recommendation on the free overview credible rather than an assertion. Dropping it
+         * left the card with a monthly figure while the heading above it printed a yearly
+         * total — the same fact, at two grains, from two different numbers.
+         */
+        chartData:
+            depth === "headline"
+                ? chartData?.recoveryProjection
+                    ? { recoveryProjection: stripForecast(chartData.recoveryProjection as Record<string, unknown>) }
+                    : null
+                : chartData
+                  ? Object.fromEntries(
+                        Object.entries(chartData).map(([k, v]) =>
+                            k === "recoveryProjection"
+                                ? [k, v ? stripForecast(v as Record<string, unknown>) : v]
+                                : [k, v]
+                        )
+                    )
+                  : chartData,
         redacted: true,
-        unlockedBy: minimumPlanFor("insights_full"),
+        unlockedBy: minimumPlanFor(depth === "headline" ? "insights_summary" : "insights_full"),
     } as Omit<T, "rawStatsSnapshot"> & RedactedReport;
 }
 
-export async function getLatestInsight(userId: string, canReadFull = true) {
+export async function getLatestInsight(userId: string, depth: ReportDepth = "full") {
     const report = await prisma.insightReport.findFirst({
         where: { userId },
         orderBy: { createdAt: "desc" },
     });
     if (!report) throw new NotFoundError("InsightReport");
-    return projectReport(report, canReadFull);
+    return projectReport(report, depth);
 }
 
-export async function getInsight(id: string, userId: string, canReadFull = true) {
+export async function getInsight(id: string, userId: string, depth: ReportDepth = "full") {
     assertValidObjectId(id);
     const report = await prisma.insightReport.findFirst({ where: { id, userId } });
     if (!report) throw new NotFoundError("InsightReport", id);
-    return projectReport(report, canReadFull);
+    return projectReport(report, depth);
 }
 
 export async function listInsights(userId: string, page: number, limit: number) {
@@ -208,7 +320,7 @@ export interface FlagSummaryFilters {
 }
 
 /**
- * Counts and totals over this user's flags, as four faceted cuts.
+ * Counts and totals over this user's flags, as several faceted cuts.
  *
  * Separate from `listFlags` rather than bolted onto its `meta` because the page needs the
  * whole distribution to draw its pattern charts *while* the list beside them is filtered,
@@ -345,6 +457,26 @@ export async function getFlagSummary(userId: string, filters: FlagSummaryFilters
             )
         ),
         byCategory: tally(narrow(), f => f.category, true),
+
+        /**
+         * `byCategory` split three ways by severity, unfiltered — like `totalAmount` and
+         * `highCount`, this describes the account rather than the current view, because it
+         * exists to answer one question the overview asks: *which categories have a red or
+         * amber finding at all*, account-wide. `byCategory` alone cannot answer that — two
+         * categories with an identical `{count: 3, amount: 9000}` can be three low-severity
+         * price rises in one and three high-severity duplicate charges in the other, and a
+         * screen deciding whether to flag a category red needs to tell those apart.
+         *
+         * Three separate tallies rather than one nested map, for the same reason `bySeverity`
+         * and `byCategory` are already separate: a consumer that only wants "is there a high
+         * finding in Groceries" reads `byCategoryBySeverity.high["Groceries"]` directly rather
+         * than reaching into a category row and checking a nested severity key.
+         */
+        byCategoryBySeverity: {
+            high: tally(all.filter(f => f.severity === "high"), f => f.category, true),
+            medium: tally(all.filter(f => f.severity === "medium"), f => f.category, true),
+            low: tally(all.filter(f => f.severity === "low"), f => f.category, true),
+        },
 
         /**
          * The largest bar each cut would have with no filters at all.

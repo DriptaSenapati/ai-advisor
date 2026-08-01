@@ -34,6 +34,7 @@ export const DEFAULT_PLAN: PlanId = "first";
  */
 export const FEATURE_KEYS = [
     "monthly_view",
+    "insights_headline",
     "insights_summary",
     "flags",
     "recurring",
@@ -71,6 +72,7 @@ export interface Plan {
 /** Every feature off — spread over this so a new key can never be silently omitted. */
 const NONE: Record<FeatureKey, boolean> = {
     monthly_view: false,
+    insights_headline: false,
     insights_summary: false,
     flags: false,
     recurring: false,
@@ -84,6 +86,7 @@ const NONE: Record<FeatureKey, boolean> = {
 const GLOW_FEATURES: Record<FeatureKey, boolean> = {
     ...NONE,
     monthly_view: true,
+    insights_headline: true,
     insights_summary: true,
     flags: true,
     recurring: true,
@@ -100,7 +103,13 @@ export const PLANS: Record<PlanId, Plan> = {
         cta: "Start free",
         caption: "No credit card required.",
         popular: false,
-        features: { ...NONE },
+        // `insights_headline` is the one paid-looking thing the free plan has, and it is
+        // deliberate: `/app` is now recommendation-first, so without it the home screen
+        // would be a locked panel for every free user — a product demonstrating itself by
+        // showing nothing. They get the health score, the key summary and the single
+        // highest-impact move; the ranked list and the argument behind it are what Glow and
+        // Radiant sell.
+        features: { ...NONE, insights_headline: true },
         limits: { statements: 1, goals: 0 },
     },
     glow: {
@@ -190,6 +199,12 @@ export const COMPARISON_ROWS: ComparisonRow[] = [
         values: { first: true, glow: true, radiant: true },
     },
     {
+        key: "insights_headline",
+        label: "Health score & your next move",
+        hint: "A score out of 100 with the working behind it, the risks worth knowing, and the single highest-impact thing to do.",
+        values: { first: true, glow: true, radiant: true },
+    },
+    {
         key: "monthly_view",
         label: "Cash-flow analysis",
         hint: "Income against expenses month by month, and what you saved or overspent.",
@@ -197,8 +212,8 @@ export const COMPARISON_ROWS: ComparisonRow[] = [
     },
     {
         key: "insights_summary",
-        label: "Key summary",
-        hint: "The risks, the positives, and the one thing worth doing next.",
+        label: "Your moves, ranked",
+        hint: "Every recommendation with what it is worth a year, how confident we are, and the effort involved.",
         values: { first: false, glow: true, radiant: true },
     },
     {
@@ -227,8 +242,8 @@ export const COMPARISON_ROWS: ComparisonRow[] = [
     },
     {
         key: "insights_full",
-        label: "Full AI report",
-        hint: "Behavioural insights, health tiles, recommendations and the recovery projection.",
+        label: "Trajectory projection & the full report",
+        hint: "Where you land in a year if nothing changes — and if you act — plus the seven sections of written analysis.",
         values: { first: false, glow: false, radiant: true },
     },
     {

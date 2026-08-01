@@ -29,13 +29,30 @@ const agentGraphSchema = new StateSchema({
 });
 
 
+/**
+ * `behaviourPatterns` and `financialContext` are the state channels that make the
+ * behaviour/event/opportunity fan-out a real graph rather than three function calls in one
+ * node. Every other node in this graph persists straight to Mongo and returns `state`
+ * unchanged (`redFlagDetectorNode`, `recurringPatternToolNode`) — that works because their
+ * output has a collection of its own. These two have nowhere to persist mid-graph (the
+ * `InsightReport` they belong to doesn't exist until `insightsNode` creates it at the very
+ * end), so they have to travel through state instead. `z.array(z.unknown())` rather than the
+ * real `BehaviourPattern[]`/`CategoryContext[]` types because a Zod state schema can't import
+ * a plain TS interface — the real shape is enforced at the type level where each node casts
+ * on read, same as `rawStatsSnapshot`'s `z.record(z.string(), z.unknown())` above it.
+ */
 const insightsAgentGraphSchema = new StateSchema({
     messages: MessagesValue,
     userId: z.string(),
     statementMetadataId: z.string().optional(),
     affectedMonths: z.array(z.string()).optional().describe("YYYY-MM months derived from the uploaded statement period"),
     rawStatsSnapshot: z.record(z.string(), z.unknown()).optional(),
-    insightReports: z.record(z.string(), z.unknown()).optional()
+    insightReports: z.record(z.string(), z.unknown()).optional(),
+    /** Written by `behaviourDetectionNode`, adjusted by `financialContextMergeNode`. */
+    behaviourPatterns: z.array(z.unknown()).optional(),
+    /** Written by `eventDetectionNode` — habit-vs-event per category, read by the merge node
+        and by `insightsNode`'s recommendation validator. */
+    financialContext: z.array(z.unknown()).optional(),
 })
 
 /**

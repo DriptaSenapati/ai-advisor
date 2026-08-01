@@ -3,21 +3,20 @@ import * as insightsService from "../services/insights.service.js";
 import { ok, accepted } from "../response.js";
 import type { AuthenticatedRequest } from "../middleware/authenticate.js";
 import { loadPlan } from "../middleware/entitlement.js";
-import { hasFeature } from "../../config/plans.js";
 
 /**
- * Both report reads are already behind `requireFeature("insights_summary")`, so
- * reaching here means the caller gets *something*. `loadPlan` is memoised on the
- * request, so re-reading it to decide the depth costs nothing.
+ * Both report reads are behind `requireFeature("insights_headline")`, which every plan has,
+ * so reaching here means the caller gets *something* — the question is only how much.
+ * `loadPlan` is memoised on the request, so re-reading it to decide the depth costs nothing.
  */
-async function canReadFullReport(req: Request): Promise<boolean> {
-    return hasFeature((await loadPlan(req)).id, "insights_full");
+async function reportDepth(req: Request): Promise<insightsService.ReportDepth> {
+    return insightsService.depthFor((await loadPlan(req)).id);
 }
 
 export async function getLatestInsight(req: Request, res: Response, next: NextFunction) {
     try {
         const userId = (req as AuthenticatedRequest).user.id;
-        const report = await insightsService.getLatestInsight(userId, await canReadFullReport(req));
+        const report = await insightsService.getLatestInsight(userId, await reportDepth(req));
         ok(res, report);
     } catch (err) {
         next(err);
@@ -28,7 +27,7 @@ export async function getInsight(req: Request, res: Response, next: NextFunction
     try {
         const userId = (req as AuthenticatedRequest).user.id;
         const id = req.params["id"] as string;
-        const report = await insightsService.getInsight(id, userId, await canReadFullReport(req));
+        const report = await insightsService.getInsight(id, userId, await reportDepth(req));
         ok(res, report);
     } catch (err) {
         next(err);

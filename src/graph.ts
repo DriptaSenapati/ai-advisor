@@ -14,6 +14,9 @@ import { payeeCanonicalizerNode } from "./modules/nodes/ai_insights_nodes/payee_
 import { statsAggregatorToolNode } from "./modules/nodes/ai_insights_nodes/stats_aggregator_tool_node.js";
 import { tranRecurringToolNode } from "./modules/nodes/ai_insights_nodes/tran_recurring_tool_node.js";
 import { redFlagDetectorNode } from "./modules/nodes/ai_insights_nodes/red_flag_detector_node.js";
+import { behaviourDetectionNode } from "./modules/nodes/ai_insights_nodes/behaviour_detection_node.js";
+import { eventDetectionNode } from "./modules/nodes/ai_insights_nodes/event_detection_node.js";
+import { financialContextMergeNode } from "./modules/nodes/ai_insights_nodes/financial_context_merge_node.js";
 import { insightsNode } from "./modules/nodes/ai_insights_nodes/insights_node.js";
 
 // TS2742: LangGraph's inferred StateGraph type references internal dist paths.
@@ -71,7 +74,8 @@ const statementProcessGraph = new StateGraph(agentGraphSchema)
     .addEdge("transactionCategorySubgraph", END) as any;
 
 /**
- * Payees → aggregate → recurring → red flags → report.
+ * Payees → aggregate → recurring → [behaviour / event / opportunity, in parallel] → merge →
+ * report.
  *
  * `payeeCanonicalizerToolNode` is **first**, and has to be: it rewrites
  * `Cluster.payeeName`, which every node after it reads. Merging two spellings of one person
@@ -79,22 +83,43 @@ const statementProcessGraph = new StateGraph(agentGraphSchema)
  * passes have keyed patterns on the old name, leaves derived rows pointing at a name that no
  * longer exists in the source.
  *
- * `redFlagDetectorToolNode` is fourth rather than anywhere else for two reasons: two of its
- * detectors read `RecurringPattern` rows the node before it has just written (including the
- * deactivation sweep that makes a superseded subscription price identifiable), and its
- * output has to be on disk before `insightsNode` builds the prompt that narrates it.
+ * **The three-way fan-out is the actual point of this shape.** `redFlagDetectorToolNode`
+ * ("opportunity detection" — duplicates, fees, price hikes: recoverable money), plus the new
+ * `behaviourDetectionNode` ("looks only for habits") and `eventDetectionNode` ("looks only for
+ * unusual events") all read `MonthlyStats`/`RecurringPattern` rows that are already on disk by
+ * this point and write nothing the other two depend on — genuinely independent analyses, so
+ * LangGraph runs them in the same superstep rather than one after another. All three fan into
+ * `financialContextMergeNode`, which is the one place a behaviour finding and an event
+ * classification are allowed to disagree with each other before `insightsNode` ever builds a
+ * prompt from either.
+ *
+ * `redFlagDetectorToolNode` has to sit in this fan-out rather than earlier for the same reason
+ * it always did: two of its detectors read `RecurringPattern` rows `recurringPatternToolNode`
+ * just wrote (including the deactivation sweep that makes a superseded subscription price
+ * identifiable) — it cannot run *before* recurring detection, only alongside its siblings
+ * after it.
  */
 const insightsAgentGraph = new StateGraph(insightsAgentGraphSchema)
     .addNode("payeeCanonicalizerToolNode", payeeCanonicalizerNode)
     .addNode("statsAggregatorToolNode", statsAggregatorToolNode)
     .addNode("recurringPatternToolNode", tranRecurringToolNode)
     .addNode("redFlagDetectorToolNode", redFlagDetectorNode)
+    .addNode("behaviourDetectionNode", behaviourDetectionNode)
+    .addNode("eventDetectionNode", eventDetectionNode)
+    .addNode("financialContextMergeNode", financialContextMergeNode)
     .addNode("insightsNode", insightsNode)
     .addEdge(START, "payeeCanonicalizerToolNode")
     .addEdge("payeeCanonicalizerToolNode", "statsAggregatorToolNode")
     .addEdge("statsAggregatorToolNode", "recurringPatternToolNode")
+    // Fan-out: all three run in parallel once recurring detection has written its rows.
     .addEdge("recurringPatternToolNode", "redFlagDetectorToolNode")
-    .addEdge("redFlagDetectorToolNode", "insightsNode")
+    .addEdge("recurringPatternToolNode", "behaviourDetectionNode")
+    .addEdge("recurringPatternToolNode", "eventDetectionNode")
+    // Fan-in: LangGraph waits for all three predecessors before running the merge node.
+    .addEdge("redFlagDetectorToolNode", "financialContextMergeNode")
+    .addEdge("behaviourDetectionNode", "financialContextMergeNode")
+    .addEdge("eventDetectionNode", "financialContextMergeNode")
+    .addEdge("financialContextMergeNode", "insightsNode")
     .addEdge("insightsNode", END) as any;
 
 export {

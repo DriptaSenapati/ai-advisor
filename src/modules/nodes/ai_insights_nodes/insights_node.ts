@@ -3,7 +3,16 @@ import { insightsAgentGraphSchema } from "../../../graph_state.js";
 import prisma from "../../../prismaClient.js";
 import { insightsGenLlm, insightSystemMessage } from "../../../models/index.js";
 import { buildRecoveryProjection, type RecommendationImpact } from "../../insights/recovery_projection.js";
+import {
+    computeHealthScore,
+    scoreAfterPlan,
+    withTrends,
+    type HealthDriver,
+} from "../../insights/health_score.js";
 import { median } from "../../stats/robust.js";
+import type { BehaviourPattern } from "../../insights/behaviour_patterns.js";
+import type { CategoryContext } from "../../insights/financial_context.js";
+import { computeRecentTrends } from "../../insights/recent_trends.js";
 
 type CategoryBreakdown = {
     category: string;
@@ -96,6 +105,36 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
             `[${s.month}] ${c.category}: spend=₹${fmt(c.totalSpend)}, share=${fmtPct(c.shareOfTotal)}%, txns=${c.txnCount}, avgTxn=₹${fmt(c.avgTxnAmount)}, momDelta=${fmtPct(c.momDelta)}%, rollingAvg6m=₹${fmt(c.rollingAvg6m)}, spiked=${c.isSpiked}, trend=${c.trendDirection}`
         ).join("\n");
     }).join("\n");
+
+    /**
+     * **The window recommendations must be grounded in — the last 6 months, nothing older.**
+     *
+     * `categoryBreakdown` above is still the full history, because the prose sections
+     * (trends, cash flow, income) legitimately describe the whole account. Recommendations are
+     * different: advice built on a spike from eight months ago is advice about a version of
+     * this account that may no longer exist. This block is deliberately the *only* category
+     * data the recommendations prompt rule below points the model at.
+     *
+     * `recentCategories` is the matching deterministic guard — see the validator further down,
+     * which rejects any recommendation whose category has no spend at all in this window,
+     * regardless of what the prompt asked for.
+     */
+    const RECENT_MONTHS = 6;
+    const recentMonthlyStats = monthlyStats.slice(-RECENT_MONTHS);
+    const recentCategoryTotals = new Map<string, number>();
+    for (const s of recentMonthlyStats) {
+        for (const c of s.categoryBreakdown as unknown as CategoryBreakdown[]) {
+            if (c.totalSpend <= 0) continue;
+            recentCategoryTotals.set(c.category, (recentCategoryTotals.get(c.category) ?? 0) + c.totalSpend);
+        }
+    }
+    const recentCategories = new Set(recentCategoryTotals.keys());
+    const recentActivity = recentMonthlyStats.length > 0
+        ? [...recentCategoryTotals.entries()]
+            .sort((a, b) => b[1] - a[1])
+            .map(([cat, total]) => `${cat}: ₹${fmt(total)} total, ₹${fmt(total / recentMonthlyStats.length)}/mo average`)
+            .join("\n")
+        : "No recent months available.";
 
     // ── Top merchants — aggregate across all months, top 5 by total spend ──
     const merchantMap = new Map<string, TopMerchant>();
@@ -237,11 +276,25 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
     // been algorithmic and correct, and its structured result was joined into a string and
     // dropped, so no UI could render it. It is now also a `duplicate_charge` flag row.
     let flaggedTransactions = "No flags detected.";
+    /**
+     * Hoisted out of the `try` because the health score reads the same rows.
+     *
+     * One query, deliberately: a second `findMany` could observe a different set if a
+     * detector run landed between them, and the score would then describe an account the
+     * prose beside it does not. Empty is the honest fallback for both — the catch below
+     * already treats a failed read as "generate the report without this".
+     */
+    let flagRows: { severity: string; amount: number; transactionId: string | null }[] = [];
     try {
         const flags = await prisma.transactionFlag.findMany({
             where: { userId },
             orderBy: [{ severity: "asc" }, { amount: "desc" }],
         });
+        flagRows = flags.map(f => ({
+            severity: f.severity,
+            amount: f.amount,
+            transactionId: f.transactionId,
+        }));
 
         if (flags.length > 0) {
             const grouped = new Map<string, typeof flags>();
@@ -280,6 +333,51 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
     const dataQualityWarning: string | null = uncategorizedMonths.length > 0
         ? `${uncategorizedMonths.length} month(s) have >15% uncategorized spend: ${uncategorizedMonths.join(", ")}. Insights for these months may be incomplete.`
         : null;
+
+    /**
+     * **Read from graph state, not computed here.** `behaviourDetectionNode` and
+     * `eventDetectionNode` run *before* this node, in parallel with
+     * `redFlagDetectorToolNode` (opportunity detection) — see the fan-out/fan-in in
+     * `graph.ts`, and `financialContextMergeNode` for the one place they're allowed to
+     * disagree with each other. This node's job is to narrate what already exists, the same
+     * relationship `flaggedTransactions` has with `redFlags.byKind` — never to invent a
+     * pattern or a classification of its own.
+     */
+    const behaviourPatterns = (state.behaviourPatterns ?? []) as BehaviourPattern[];
+    let behaviourFindings = "No behaviour patterns detected.";
+    if (behaviourPatterns.length > 0) {
+        behaviourFindings = behaviourPatterns
+            .map(
+                (p) =>
+                    `  ${p.key}: ${p.label} — ${p.summary}\n` +
+                    p.findings.map((f) => `    • ${f}`).join("\n") +
+                    `\n    Impact: ${p.impactDetail}`
+            )
+            .join("\n");
+    }
+
+    /**
+     * **Habit vs. event, for every category that shows an elevated month.** This is what stops
+     * a single ₹3,50,000 wedding transfer from being read as "Transfers & Payments is
+     * trending up" — see `financial_context.ts`'s docblock. Feeds the prompt as bias; the
+     * `recommendations rules` below tell the model not to target an `event` category, and the
+     * deterministic validator after the LLM call is what actually enforces it regardless of
+     * whether the model listened.
+     */
+    const financialContext = (state.financialContext ?? []) as CategoryContext[];
+    let financialContextBlock = "No elevated categories to classify.";
+    try {
+        if (financialContext.length > 0) {
+            financialContextBlock = financialContext
+                .map((c) => `  ${c.category}: ${c.classification.toUpperCase()} — ${c.note}`)
+                .join("\n");
+        }
+    } catch (err) {
+        console.error("[Insights] financial context failed:", err);
+    }
+    const eventCategories = new Set(
+        financialContext.filter((c) => c.classification === "event").map((c) => c.category)
+    );
 
     const rawStatsSnapshot = {
         tier,
@@ -374,10 +472,161 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
         refunds,
         duplicateSuspects,
         flaggedTransactions,
+        behaviourFindings,
+        financialContext: financialContextBlock,
+        recentActivity,
         dataQualityWarning: dataQualityWarning ?? "None",
     });
 
     const insightReport = await insightsGenLlm.invoke(prompt);
+
+    /**
+     * **`dataQualityWarning` is ours, not the model's — take it back.**
+     *
+     * It is computed above from a real threshold (any month over 15% uncategorised) and passed
+     * into the prompt purely as context. The schema also asks the model for it, so the model
+     * dutifully *echoes it back* — including the literal `"None"` this file substitutes when
+     * there is nothing to warn about. That string is truthy, so the dashboard rendered an amber
+     * "Heads up · None" caveat on every healthy account.
+     *
+     * Overwriting rather than deleting the schema field keeps the prompt's shape intact while
+     * making the stored value the authoritative one. A caveat about the reader's own data is
+     * the last thing that should be left to a model's paraphrase.
+     */
+    (insightReport as { dataQualityWarning?: string | null }).dataQualityWarning =
+        dataQualityWarning;
+
+    /**
+     * **The narrative is the model's; every number stays the deterministic one from
+     * `behaviourPatterns` above.** `insightReport.behaviourNarratives` is joined onto the
+     * patterns by `key` — a closed enum, same anti-miscounted-batch-bug reasoning as
+     * `redFlags.byKind` — never by array position. A pattern the model didn't narrate (or
+     * mismatched) simply keeps its deterministic `summary`/`impactDetail` as its only prose;
+     * it never goes unlabelled.
+     *
+     * Attached to the LLM's own output object (same pattern `dataQualityWarning` uses above)
+     * because `insights` is a bare `Json` column with no schema enforced at write time — a key
+     * the LLM schema doesn't declare is safe to add here.
+     */
+    const narrativesByKey = new Map(
+        (
+            (insightReport as { behaviourNarratives?: { key: string; narrative: string }[] })
+                .behaviourNarratives ?? []
+        ).map((n) => [n.key, n.narrative])
+    );
+    (insightReport as { behaviourPatterns?: unknown }).behaviourPatterns = behaviourPatterns.map((p) => ({
+        ...p,
+        narrative: narrativesByKey.get(p.key) ?? null,
+    }));
+
+    /**
+     * Persisted so the Overview's "Events & Habits" section can render this directly — until
+     * now it only ever steered the prompt and the validator below, never reached the reader.
+     */
+    (insightReport as { financialContext?: unknown }).financialContext = financialContext;
+
+    /**
+     * "What's good now" / "what's bad now" — the last 6 months against everything before them.
+     * See `recent_trends.ts`'s docblock. Entirely deterministic and independent of the LLM
+     * call; computed here rather than earlier only because it has nowhere to persist to until
+     * this point, same reason `behaviourPatterns`/`financialContext` are attached here too.
+     */
+    try {
+        (insightReport as { recentTrends?: unknown }).recentTrends = computeRecentTrends(monthlyStats);
+    } catch (err) {
+        console.error("[Insights] recent trends failed:", err);
+        (insightReport as { recentTrends?: unknown }).recentTrends = { good: null, bad: null };
+    }
+
+    /**
+     * **The recommendation validator — the guarantee, not the prompt instruction above it.**
+     *
+     * Two independent rules, both deterministic:
+     *
+     * 1. A recommendation whose `category` is in `eventCategories` — the wedding transfer, the
+     *    medical bill — is dropped and rewritten as a one-line observation. The event still
+     *    gets *acknowledged* ("this happened, it's already over"), it just never becomes an
+     *    instruction to change a habit that doesn't exist.
+     * 2. **A recommendation that names a recognised recurring payee is dropped, by name — not
+     *    by category.** `payeePatterns` (built above, feeds the "RECURRING P2P OUTFLOWS"
+     *    prompt section) is every individual the account sends money to repeatedly enough for
+     *    `recurring_pattern_tool.ts` to have detected a pattern — a genuine relationship, not
+     *    a one-off. Excluding all of `Transfers & Payments` used to be the rule here and it
+     *    was too broad: it also silenced a real, sustained, changeable habit — steadily
+     *    climbing transfers with no recognised payee behind them — that this account's own
+     *    data showed. Matching on the payee's name in the recommendation's own `action`/
+     *    `evidence` text is what lets those two cases split: a rise the model built around
+     *    Dripta or Runu Senapati is dropped; a rise built around the category in general, or
+     *    around a payee that has never recurred, is allowed through like anything else.
+     *
+     * `observations` is deliberately short strings, not another structured card: this is the
+     * one thing on the report that is explicitly *not* asking for a decision, and treating it
+     * with the same weight as a recommendation would undercut that.
+     */
+    const knownPayees = payeePatterns
+        .map((p) => p.payeeName)
+        .filter((name): name is string => Boolean(name && name.trim().length > 0));
+
+    const rawRecommendations = (
+        (insightReport as {
+            recommendations?: { slug: string; action: string; category: string | null; evidence?: string; reasoning?: string }[];
+        }).recommendations ?? []
+    );
+    /**
+     * **Every word of the payee's name, not the name as one contiguous phrase.** A recommendation
+     * naming two payees at once — "Log transfers to Runu and Dripta Senapati" — never contains
+     * the literal substring "Runu Senapati", because the model (correctly, grammatically)
+     * shares the surname across both first names instead of repeating it. Matching whole-string
+     * missed exactly this on real output. Requiring every word of "Runu Senapati" to appear
+     * *somewhere* in the text — not contiguously — catches that construction while still
+     * requiring both the given name and the surname, not just a shared surname on its own.
+     */
+    const nameMatches = (name: string, text: string): boolean => {
+        const words = name.toLowerCase().split(/\s+/).filter((w) => w.length >= 3);
+        return words.length > 0 && words.every((w) => text.includes(w));
+    };
+
+    const observations: string[] = [];
+    const validatedRecommendations = rawRecommendations.filter((r) => {
+        if (!r.category) return true;
+
+        /**
+         * **Rule 0 — recency, and it runs before anything else.** `recentCategories` (built
+         * above from `RECENT_MONTHS = 6`) is every category that actually spent money in the
+         * last 6 months. A recommendation whose category isn't in that set was necessarily
+         * built from older history — the prompt rule asked the model not to do this, this is
+         * what actually stops it. Dropped silently into an observation rather than surfaced as
+         * a "such-and-such was excluded" line, because unlike the event/family cases there is
+         * nothing current to acknowledge — the category simply isn't part of the account any
+         * more right now.
+         */
+        if (!recentCategories.has(r.category)) {
+            observations.push(
+                `${r.category}: left out of the plan — no meaningful activity in the last ${RECENT_MONTHS} months, even though it shows up earlier in your history.`
+            );
+            return false;
+        }
+
+        const text = `${r.action} ${r.evidence ?? ""} ${r.reasoning ?? ""}`.toLowerCase();
+        const namedPayee = knownPayees.find((name) => nameMatches(name, text));
+        if (namedPayee) {
+            observations.push(
+                `${r.category}: a recommendation built around payments to ${namedPayee} was left out — that's a recognised relationship, not a spending habit to change, whatever the amount.`
+            );
+            return false;
+        }
+
+        if (!eventCategories.has(r.category)) return true;
+        const context = financialContext.find((c) => c.category === r.category);
+        observations.push(
+            context
+                ? `${r.category}: ${context.note}`
+                : `${r.category} was excluded from the plan — its recent increase looks like a one-off event, not a habit.`
+        );
+        return false;
+    });
+    (insightReport as { recommendations?: unknown }).recommendations = validatedRecommendations;
+    (insightReport as { observations?: string[] }).observations = observations;
 
     // ── Recovery projection ─────────────────────────────────────────────────
     //
@@ -410,8 +659,12 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
             }
         }
         const categoryMedians: Record<string, number> = {};
+        const categorySeries: Record<string, number[]> = {};
         for (const [category, values] of categorySpend) {
             categoryMedians[category] = median(values);
+            // The series itself, not just its median — `scoreConfidence` needs the spread
+            // and the month count, and neither survives being reduced to one number.
+            categorySeries[category] = values;
         }
 
         recoveryProjection = buildRecoveryProjection(
@@ -420,10 +673,97 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
             {
                 medianMonthlyExpenses: median(monthlyStats.map(s => s.totalExpenses)),
                 categoryMedians,
+                categorySeries,
             },
         );
     } catch (err) {
         console.error("[Insights] recovery projection failed:", err);
+    }
+
+    // ── Health score ────────────────────────────────────────────────────────
+    //
+    // Deterministic and independent of the LLM call above — it reads the same monthly rows,
+    // recurring patterns and flags the prompt was built from, so the headline figure and the
+    // prose under it describe one account. `redFlagDetectorToolNode` and
+    // `recurringPatternToolNode` both run *before* this node, which is why the inputs are on
+    // disk by now; reordering the graph would silently score every account as if it had no
+    // commitments and nothing flagged.
+    //
+    // Best-effort like the projection: this is one paid LLM call in, and a report without a
+    // score is worth far more than no report.
+    let health = null;
+    let healthAfterPlan = null;
+    let scoreDelta: number | null = null;
+    try {
+        /** Recurring debits normalised to a month, matching `getRecurringSummary`'s `perMonth`. */
+        const perMonth = (p: { estimatedMonthlyAmount: number; frequency: string }) =>
+            p.frequency === "annually"
+                ? p.estimatedMonthlyAmount / 12
+                : p.frequency === "quarterly"
+                  ? p.estimatedMonthlyAmount / 3
+                  : p.estimatedMonthlyAmount;
+
+        const committedMonthly = activeDebitPatterns.reduce((sum, p) => sum + perMonth(p), 0);
+        const cancellableMonthly = activeDebitPatterns
+            .filter(p => p.cancellability === "cancellable")
+            .reduce((sum, p) => sum + perMonth(p), 0);
+
+        const scoreInput = {
+            monthly: monthlyStats.map(s => ({
+                month: s.month,
+                totalIncome: s.totalIncome,
+                totalExpenses: s.totalExpenses,
+                netSavings: s.netSavings,
+                savingsRate: s.savingsRate,
+            })),
+            committedMonthly,
+            cancellableMonthly,
+            flags: flagRows,
+        };
+
+        health = computeHealthScore(scoreInput);
+
+        /**
+         * The same score with the plan applied, which is the number the overview leads with:
+         * "15 → 43 after completing the plan".
+         *
+         * The uplift is the **bounded** total (`monthlyWithPlan − monthlyBaseline`), never the
+         * sum of the model's raw claims — one run claimed ₹1,00,250/month against a ₹862
+         * baseline, and an after-score built on that would have promised a jump from 15 to 100.
+         * Falls back to the current score when there is no projection, which reads as "no
+         * improvement to show" rather than as a fabricated one.
+         */
+        if (recoveryProjection) {
+            const uplift = Math.max(
+                0,
+                recoveryProjection.monthlyWithPlan - recoveryProjection.monthlyBaseline
+            );
+            healthAfterPlan = uplift > 0 ? scoreAfterPlan(scoreInput, uplift) : health;
+        }
+
+        /**
+         * The delta needs the report this one is about to replace, so it must be read
+         * *before* the create below — afterwards the newest row is this one and every
+         * report would score a delta of zero against itself.
+         *
+         * Null when there is no previous report, and that is deliberately not folded into
+         * 0: "nothing to compare with" and "no change" are different facts, and only one of
+         * them is worth putting a ↑ or ↓ next to.
+         */
+        const previous = await prisma.insightReport.findFirst({
+            where: { userId, healthScore: { not: null } },
+            orderBy: { generatedAt: "desc" },
+            select: { healthScore: true, scoreBreakdown: true },
+        });
+        if (previous?.healthScore != null) {
+            scoreDelta = health.score - previous.healthScore;
+        }
+
+        // Per-driver movement, matched on `key` rather than position — a driver reordered in a
+        // later release would otherwise attribute one driver's change to another.
+        health = withTrends(health, (previous?.scoreBreakdown ?? null) as HealthDriver[] | null);
+    } catch (err) {
+        console.error("[Insights] health score failed:", err);
     }
 
     await prisma.insightReport.create({
@@ -433,6 +773,16 @@ const insightsNode: GraphNode<typeof insightsAgentGraphSchema> = async (state) =
             tier,
             insights: insightReport,
             rawStatsSnapshot,
+            healthScore: health?.score ?? null,
+            healthScoreAfterPlan: healthAfterPlan?.score ?? null,
+            riskLevel: health?.riskLevel ?? null,
+            scoreDelta,
+            scoreBreakdown: (health?.drivers ?? null) as never,
+            // `healthAfterPlan` already carries the full re-scored breakdown (`scoreAfterPlan`
+            // re-runs `computeHealthScore` end to end) — this was computed and thrown away
+            // before. `null` when there was no projection to derive an uplift from, same as
+            // `healthScoreAfterPlan`.
+            scoreBreakdownAfterPlan: (healthAfterPlan?.drivers ?? null) as never,
             // Cast because Prisma's `InputJsonValue` requires an index signature and
             // `RecoveryProjection` is a named interface. The shape is plain arrays,
             // numbers, strings and booleans — JSON-safe by construction.

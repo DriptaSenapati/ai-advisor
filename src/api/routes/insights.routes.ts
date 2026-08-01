@@ -19,23 +19,32 @@ const router = Router();
  *     tags: [Insights]
  *     summary: Get the most recent InsightReport
  *     description: |
- *       **Projected by plan, not simply allowed or refused.** Below `insights_summary`
- *       (the free plan) this is a 403. On a plan with `insights_summary` but not
- *       `insights_full`, the report comes back with `insights` reduced to `keySummary`
- *       and `dataQualityWarning`, no `rawStatsSnapshot`, and `chartData` stripped of
- *       `recoveryProjection` — flagged with `redacted: true` and `unlockedBy`. One
- *       endpoint serving two depths is what lets the dashboard's summary band and the
- *       full report share a read; the withheld sections never reach the client, so the
- *       lock is real rather than presentational.
+ *       **Projected by plan, never refused.** `insights_headline` is on every plan, so this
+ *       always answers — at one of three depths:
+ *
+ *       - `headline` (First light): `insights` reduced to `keySummary`, `dataQualityWarning`
+ *         and the single highest-impact recommendation; `chartData` and `rawStatsSnapshot`
+ *         dropped entirely.
+ *       - `summary` (Glow): every recommendation, plus `chartData` without
+ *         `recoveryProjection`.
+ *       - `full` (Radiant): the whole report.
+ *
+ *       The two shallower depths carry `redacted: true` and an `unlockedBy` naming the
+ *       *next* plan up rather than always the top one. The four score columns
+ *       (`healthScore`, `riskLevel`, `scoreDelta`, `scoreBreakdown`) survive at every depth —
+ *       they are the overview's headline on every plan and are derived arithmetic over the
+ *       user's own figures, not LLM output.
+ *
+ *       One endpoint serving three depths is what lets the overview, the dashboard's summary
+ *       band and the full report share a read; the withheld sections never reach the client,
+ *       so the lock is real rather than presentational.
  *     responses:
  *       200:
  *         description: InsightReport, complete or redacted according to plan
- *       403:
- *         description: PLAN_REQUIRED — this plan has no insights at all
  *       404:
  *         description: No insights generated yet
  */
-router.get("/latest", requireFeature("insights_summary"), insightsController.getLatestInsight);
+router.get("/latest", requireFeature("insights_headline"), insightsController.getLatestInsight);
 
 /**
  * Both flag routes must stay **above** `GET /:id`.
@@ -161,11 +170,11 @@ router.get(
  *         schema: { type: string }
  *     responses:
  *       200:
- *         description: Full InsightReport
+ *         description: InsightReport, projected to the caller's depth exactly like /latest
  *       404:
  *         $ref: '#/components/responses/NotFound'
  */
-router.get("/:id", requireFeature("insights_summary"), insightsController.getInsight);
+router.get("/:id", requireFeature("insights_headline"), insightsController.getInsight);
 
 /**
  * @openapi

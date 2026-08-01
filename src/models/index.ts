@@ -143,6 +143,22 @@ const insightsGenllmSchema = z.object({
         })).describe("One entry per kind present in FLAGGED TRANSACTIONS. Omit kinds with no flags — never invent one."),
     }).nullable().describe("Null only when FLAGGED TRANSACTIONS says no flags were detected."),
     /**
+     * Narration for the behaviour patterns `behaviour_patterns.ts` already found and scored.
+     *
+     * Same relationship `redFlags.byKind` has with the flag detectors: detection, the badge
+     * and the confidence % all happen deterministically before this call, in the
+     * BEHAVIOUR PATTERNS section below. The model writes one sentence per pattern explaining
+     * it in plain language — it does not decide which patterns exist and never invents a
+     * number. `key` is a closed enum for the same reason `redFlags.byKind.kind` is: joining a
+     * free-text label, or an array assumed to line up positionally with ours, is the exact
+     * failure mode a miscounted LLM batch has already caused once in this codebase.
+     */
+    behaviourNarratives: z.array(z.object({
+        key: z.enum(["impulse_buying", "spending_discipline", "lifestyle_inflation", "refund_recovery"])
+            .describe("Which pattern this narrates. Use only keys listed in the BEHAVIOUR PATTERNS section."),
+        narrative: z.string().describe("1-2 sentences explaining this pattern in plain language, citing the ₹ figures and categories already given. Do not invent a number not present in the section."),
+    })).describe("One entry per key present in BEHAVIOUR PATTERNS. Omit keys with no pattern — never invent one. Empty array if the section says none were detected."),
+    /**
      * Ranked, quantified recommendations — the deeper set behind `keySummary.actionItem`.
      *
      * Shape mirrors `goalAdvisorLlmSchema.suggestions` so both screens read the same way,
@@ -385,12 +401,21 @@ redFlags rules:
 - headline must name the costliest single pattern with its ₹ total
 - If the section says no flags were detected, set redFlags to null
 
+behaviourNarratives rules:
+- The BEHAVIOUR PATTERNS section lists patterns already detected and scored algorithmically (a badge, a confidence %, and specific ₹ figures). Your job is to explain them in plain language, not to find them or second-guess their numbers
+- Write one behaviourNarratives entry for each key listed there and no others — never invent a key that has no pattern, and never omit one that does
+- Cite the exact ₹ figures and category names already given for that pattern; do not restate its confidence % or badge, and do not compute a different number
+- If the section says no behaviour patterns were detected, return an empty array
+
 recommendations rules:
+- Every recommendation's category must appear in RECENT 6 MONTHS ONLY. That section is the account as it stands *now* — a category with real spend eight months ago but nothing in the recent window is not a habit to act on, whatever the full CATEGORY BREAKDOWN section above shows about its older history. Ground the evidence field in figures from RECENT 6 MONTHS ONLY, not older months
+- Check FINANCIAL CONTEXT before writing any recommendation with a category. If that category is marked EVENT, do not write a recommendation targeting it — a wedding, a medical bill, a house payment, a one-time large transfer are things that already happened, not a habit the user can change going forward. You may mention the event in another recommendation's reasoning for context, but never build the action itself around it. Only a category marked HABIT, or one with no FINANCIAL CONTEXT entry at all where the FLAGGED TRANSACTIONS or RECURRING EXPENSE PATTERNS sections separately show a genuine repeating pattern (a subscription, a recurring merchant), may be targeted
 - Every recommendation must rest on a ₹ figure that appears somewhere in the data above, quoted in its evidence field
 - monthlySavingImpact is a SUSTAINED, REPEATING monthly reduction — the amount by which every future month's outflow falls. It is not a total, not an annual figure, and not a one-off recovery
 - A ONE-TIME recovery is not a monthly saving. Disputing a duplicate charge, reclaiming a fee, or cancelling something already paid for returns money once: either divide that amount across 12 months, or set monthlySavingImpact to 0 and let the action stand on its own merit. Never enter the full one-off amount
 - monthlySavingImpact must not exceed the TYPICAL monthly spend on the thing being targeted — judge "typical" from the median month, not from the largest one. An action cannot save more than is ordinarily spent on it, and a single unusual month is not evidence of a recurring commitment
-- Be conservative with Transfers & Payments. It contains loan EMIs, credit-card bills and money sent to people — most of that is an obligation or a transfer between the user's own accounts, not discretionary spend that can simply stop. Do not assume a large one-off transfer to a person is recoverable every month
+- Never build a recommendation around a payee named in RECURRING P2P OUTFLOWS (identified payees), regardless of amount — a recurring named individual is a recognised relationship, not a spending habit, and capping a payment to them is advice about who to pay, not what to spend on. Do not name them in a recommendation's action or evidence, even to illustrate a cap
+- Transfers & Payments as a whole is NOT off-limits — if FINANCIAL CONTEXT marks it HABIT because the category's total has risen for 3+ months running and that rise is not carried by a payee from RECURRING P2P OUTFLOWS, recommend against it like any other habit. The distinction is who the money is going to, not the category name
 - Prefer recommendations that address a FLAGGED TRANSACTIONS kind or a cancellable recurring expense; those are the ones with evidence behind them
 - Each recommendation targets ONE lever, same rule as actionItem. Four weak recommendations are worse than two strong ones
 - Order by monthlySavingImpact descending. slug must be unique and kebab-case
@@ -438,6 +463,15 @@ Banks: {banks}
 
 ── FLAGGED TRANSACTIONS (detected algorithmically — explain these, do not add to them) ──
 {flaggedTransactions}
+
+── BEHAVIOUR PATTERNS (detected and scored algorithmically — explain these, do not add to them) ──
+{behaviourFindings}
+
+── FINANCIAL CONTEXT (habit vs. event, classified algorithmically for every elevated category) ──
+{financialContext}
+
+── RECENT 6 MONTHS ONLY (category totals for just the most recent 6 months — recommendations must be grounded here, not in older history) ──
+{recentActivity}
 
 ── DATA QUALITY ──
 {dataQualityWarning}

@@ -212,6 +212,31 @@ model InsightReport {
   insights         Json
   rawStatsSnapshot Json
   chartData        Json?
+  /// 0–100, deterministic — see `modules/insights/health_score.ts`. Optional
+  /// because reports generated before it existed have none, and a missing score
+  /// must render as "no score yet" rather than as zero.
+  healthScore      Int?
+  /// The same score with the plan's total bounded monthly impact applied, so the
+  /// overview can say "15 → 43 after completing the plan". Counterfactual over the
+  /// months on record, not a forecast — `recoveryProjection` owns the future.
+  healthScoreAfterPlan Int?
+  /// low | medium | high, banded off `healthScore` alone so the two cannot disagree.
+  riskLevel        String?
+  /// Against the previous report for this user. Null on the first one — there is
+  /// nothing to compare with, which is not the same fact as "no change".
+  scoreDelta       Int?
+  /// The four weighted drivers behind `healthScore` — each with its contribution,
+  /// the figure it was measured from, a plain-English explanation, a per-driver
+  /// trend and one costed suggestion. Persisted so the number can be explained
+  /// without recomputing it, and so the *next* report can diff against it.
+  scoreBreakdown   Json?
+  /// The same four drivers, recomputed with the plan's bounded uplift applied —
+  /// `scoreAfterPlan()` already builds this full breakdown (not just the total),
+  /// it was simply being discarded. Only `savings` and `cash_flow` actually move
+  /// under today's formula, since the uplift is applied to `netSavings` alone;
+  /// `money_at_risk` and `committed_spending` come back identical to
+  /// `scoreBreakdown`. Null wherever `healthScoreAfterPlan` is null.
+  scoreBreakdownAfterPlan Json?
   createdAt        DateTime @default(now())
 }
 

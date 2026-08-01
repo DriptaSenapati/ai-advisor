@@ -43,6 +43,7 @@
     "repair:categories": "cross-env NODE_ENV=development tsx src/scripts/repair-categories.ts",
     "grant:plan": "cross-env NODE_ENV=development tsx src/scripts/grant-plan.ts",
     "check:plans": "cross-env NODE_ENV=development tsx src/scripts/check-plans.ts",
+    "check:health": "cross-env NODE_ENV=development tsx src/scripts/check-health.ts",
     "clean:verify": "cross-env NODE_ENV=development tsx src/scripts/clean-verify.ts",
     "check:goal-gate": "cross-env NODE_ENV=development tsx src/scripts/check-goal-gate.ts"
   },
