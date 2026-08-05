@@ -12,7 +12,7 @@ export async function uploadStatement(req: Request, res: Response, next: NextFun
         const { bankName, password } = req.body as { bankName?: string; password?: string };
         const userId = (req as AuthenticatedRequest).user.id;
         const result = await statementsService.uploadStatement(
-            req.file.path,
+            req.file.buffer,
             bankName,
             userId,
             password,

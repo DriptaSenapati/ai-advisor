@@ -10,6 +10,7 @@ import crypto from "crypto";
 import fs from "fs";
 import moment from "moment";
 import prisma from "../../prismaClient.js";
+import { storage } from "../../lib/storage.js";
 
 const TEMP_ID_KEY = process.env.TEMP_ID_KEY as string;
 
@@ -158,67 +159,76 @@ async function failExtraction(metadataId: string, message: string): Promise<void
 const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) => {
     console.log(`[PDF Extractor] Parsing statement: ${state.statementPath}`);
 
-    const pdfBytes = fs.readFileSync(state.statementPath);
-    const contentHash = crypto.createHash("sha256").update(pdfBytes).digest("hex");
+    // `state.statementPath` is a storage key (local path or S3 key, driver-
+    // dependent) — resolved to a real local path once here, so everything below
+    // (mupdf, the vision calls) keeps working exactly as it did when this field
+    // was always a disk path.
+    const localPdfPath = await storage.downloadToTempFile(state.statementPath);
+    try {
+        const pdfBytes = fs.readFileSync(localPdfPath);
+        const contentHash = crypto.createHash("sha256").update(pdfBytes).digest("hex");
 
-    let metadataId: string;
+        let metadataId: string;
 
-    if (state.statementMetadataId) {
-        // API flow: record pre-created by the upload service, just continue
-        metadataId = state.statementMetadataId;
-        console.log(`[PDF Extractor] Using pre-created StatementMetadata (id: ${metadataId})`);
-    } else {
-        // CLI flow: full dedup check + create
-        const existing = await prisma.statementMetadata.findUnique({ where: { contentHash } });
-        if (existing) {
-            console.warn(`[PDF Extractor] Duplicate detected (id: ${existing.id}). Aborting.`);
-            throw new Error(`Duplicate statement upload: already processed (StatementMetadata id: ${existing.id}).`);
+        if (state.statementMetadataId) {
+            // API flow: record pre-created by the upload service, just continue
+            metadataId = state.statementMetadataId;
+            console.log(`[PDF Extractor] Using pre-created StatementMetadata (id: ${metadataId})`);
+        } else {
+            // CLI flow: full dedup check + create
+            const existing = await prisma.statementMetadata.findUnique({ where: { contentHash } });
+            if (existing) {
+                console.warn(`[PDF Extractor] Duplicate detected (id: ${existing.id}). Aborting.`);
+                throw new Error(`Duplicate statement upload: already processed (StatementMetadata id: ${existing.id}).`);
+            }
+            const metadata = await prisma.statementMetadata.create({
+                data: { bankName: state.bankName || "Unknown Bank", contentHash, extractionStatus: "Processing", insightsStatus: "Not Started" },
+            });
+            metadataId = metadata.id;
+            console.log(`[PDF Extractor] StatementMetadata created (id: ${metadataId})`);
         }
-        const metadata = await prisma.statementMetadata.create({
-            data: { bankName: state.bankName || "Unknown Bank", contentHash, extractionStatus: "Processing", insightsStatus: "Not Started" },
-        });
-        metadataId = metadata.id;
-        console.log(`[PDF Extractor] StatementMetadata created (id: ${metadataId})`);
-    }
 
-    const password = state.pdfPassword;
+        const password = state.pdfPassword;
 
-    await extractBasicDetails(state.statementPath, metadataId, state.bankName || "Unknown Bank", password);
+        await extractBasicDetails(localPdfPath, metadataId, state.bankName || "Unknown Bank", password);
 
-    const detectedAsImage = isImageBasedPdf(state.statementPath, password);
-    console.log(`[PDF Extractor] Detected: ${detectedAsImage ? "image-based" : "text-based"}`);
+        const detectedAsImage = isImageBasedPdf(localPdfPath, password);
+        console.log(`[PDF Extractor] Detected: ${detectedAsImage ? "image-based" : "text-based"}`);
 
-    let isImageBased = detectedAsImage;
+        let isImageBased = detectedAsImage;
 
-    if (!detectedAsImage) {
-        try {
-            const rows = await extractTextBased(state.statementPath, metadataId, password);
+        if (!detectedAsImage) {
+            try {
+                const rows = await extractTextBased(localPdfPath, metadataId, password);
+                if (rows.length === 0) {
+                    await failExtraction(metadataId, "No transactions detected. Header found but no transaction rows could be parsed from the PDF.");
+                    throw new Error("No transactions detected in the extracted PDF.");
+                }
+            } catch (err) {
+                if (err instanceof Error && err.message.startsWith("No transactions detected")) throw err;
+                console.warn("[PDF Extractor] Text extraction failed — falling back to vision LLM:", err);
+                isImageBased = true;
+            }
+        }
+
+        if (isImageBased) {
+            const rows = await extractImageBased(localPdfPath, metadataId, password);
             if (rows.length === 0) {
-                await failExtraction(metadataId, "No transactions detected. Header found but no transaction rows could be parsed from the PDF.");
+                await failExtraction(metadataId, "No transactions detected. Vision LLM found no transaction rows in any page of the PDF.");
                 throw new Error("No transactions detected in the extracted PDF.");
             }
-        } catch (err) {
-            if (err instanceof Error && err.message.startsWith("No transactions detected")) throw err;
-            console.warn("[PDF Extractor] Text extraction failed — falling back to vision LLM:", err);
-            isImageBased = true;
+            validateMonthRange(rows);
+            await completeExtraction(metadataId, true);
+            console.log(`[PDF Extractor] Done — ${rows.length} transaction(s) via vision LLM`);
+            return { statementMetadataId: metadataId, isImageBased: true, transactionData: rows as any };
         }
-    }
 
-    if (isImageBased) {
-        const rows = await extractImageBased(state.statementPath, metadataId, password);
-        if (rows.length === 0) {
-            await failExtraction(metadataId, "No transactions detected. Vision LLM found no transaction rows in any page of the PDF.");
-            throw new Error("No transactions detected in the extracted PDF.");
-        }
-        validateMonthRange(rows);
-        await completeExtraction(metadataId, true);
-        console.log(`[PDF Extractor] Done — ${rows.length} transaction(s) via vision LLM`);
-        return { statementMetadataId: metadataId, isImageBased: true, transactionData: rows as any };
+        await completeExtraction(metadataId, false);
+        console.log("[PDF Extractor] Done — text extraction complete");
+        return { statementMetadataId: metadataId, isImageBased: false };
+    } finally {
+        await storage.releaseTempFile(localPdfPath);
     }
-
-    await completeExtraction(metadataId, false);
-    console.log("[PDF Extractor] Done — text extraction complete");
-    return { statementMetadataId: metadataId, isImageBased: false };
 };
 
 export { pdfExtractorToolNode };

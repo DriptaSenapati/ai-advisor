@@ -71,15 +71,17 @@ await Promise.all([
 console.log("\n  queues                   drained");
 
 // Any PDF still on disk belongs to a statement that is now gone. `.gitkeep` stays.
-const uploads = path.join(process.cwd(), "uploads");
+// Only meaningful under the local storage driver (STORAGE_DRIVER=s3 keeps
+// nothing here) — dev-only script, so that is always what is running.
+const statementUploads = path.join(process.cwd(), "uploads", "statements");
 let files = 0;
-if (fs.existsSync(uploads)) {
-    for (const f of fs.readdirSync(uploads).filter((f) => f.toLowerCase().endsWith(".pdf"))) {
-        fs.rmSync(path.join(uploads, f), { force: true });
+if (fs.existsSync(statementUploads)) {
+    for (const f of fs.readdirSync(statementUploads).filter((f) => f.toLowerCase().endsWith(".pdf"))) {
+        fs.rmSync(path.join(statementUploads, f), { force: true });
         files++;
     }
 }
-console.log(`  uploads/*.pdf            -${files}`);
+console.log(`  uploads/statements/*.pdf -${files}`);
 
 console.log("\nKept:");
 console.log(`  User                     ${await prisma.user.count()}`);

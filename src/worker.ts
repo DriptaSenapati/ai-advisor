@@ -1,7 +1,7 @@
 import "./envConfig.js";
-import fs from "fs/promises";
 import { Worker, type Job } from "bullmq";
 import { connection } from "./queue/connection.js";
+import { storage } from "./lib/storage.js";
 import {
     insightsQueue,
     goalQueue,
@@ -117,7 +117,7 @@ const nodeReporter = (userId: string, statementId: string) => async (node: strin
 const extractWorker = new Worker<ExtractJobData>(
     "pdf.extract",
     async (job) => {
-        const { statementId, filePath, bankName, userId, pdfPassword } = job.data;
+        const { statementId, storageKey, bankName, userId, pdfPassword } = job.data;
         await publishStatementProgress(userId, statementId, "extracting", 5);
         // `pdfExtractorNode` completing publishes `extracted`(30) via the reporter.
         // Terminal for this job, but *not* for the statement — it is now parked at
@@ -125,7 +125,7 @@ const extractWorker = new Worker<ExtractJobData>(
         await runExtractionPipeline(
             statementId,
             userId,
-            filePath,
+            storageKey,
             bankName,
             pdfPassword,
             nodeReporter(userId, statementId)
@@ -148,7 +148,7 @@ const extractWorker = new Worker<ExtractJobData>(
  * `StatementExtractedData` instead.
  */
 extractWorker.on("completed", async (job) => {
-    await fs.rm(job.data.filePath, { force: true }).catch(() => {});
+    await storage.delete(job.data.storageKey).catch(() => {});
     // A successful run may be the *retry* of a locked statement, which is the one
     // case where a file was deliberately kept. Clearing the marker alongside the
     // delete is what stops `POST /unlock` offering a file that is no longer there.
@@ -172,7 +172,7 @@ extractWorker.on("failed", async (job, err) => {
         // writing `retainedFile` when the password was the problem. All that is
         // left here is to leave those bytes alone.
         if (job && !isPdfPasswordError(err)) {
-            await fs.rm(job.data.filePath, { force: true }).catch(() => {});
+            await storage.delete(job.data.storageKey).catch(() => {});
         }
         await publishFailure(job?.data.userId, "extract_failed", err, { statementId: job?.data.statementId });
     }

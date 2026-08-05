@@ -1,6 +1,4 @@
-import { createHash } from "crypto";
-import fs from "fs";
-import path from "path";
+import { createHash, randomUUID } from "crypto";
 import prisma from "../../prismaClient.js";
 import { statementExtractGraph, statementProcessGraph } from "../../graph.js";
 import { isPdfPasswordError } from "../../modules/pdf/pdf_extractor.js";
@@ -8,6 +6,7 @@ import { ConflictError, NotFoundError, PlanLimitError, PlanRequiredError, assert
 import { extractQueue, pdfQueue } from "../../queue/index.js";
 import { planIdFor } from "../middleware/entitlement.js";
 import { jobPriorityFor, minimumPlanFor, nextPlanForLimit, resolvePlan } from "../../config/plans.js";
+import { storage } from "../../lib/storage.js";
 import {
     listUserProgress,
     publishStatementProgress,
@@ -15,9 +14,8 @@ import {
     toPublicStatement,
 } from "../../queue/progress.js";
 
-function computeContentHash(filePath: string): string {
-    const bytes = fs.readFileSync(filePath);
-    return createHash("sha256").update(bytes).digest("hex");
+function computeContentHash(buffer: Buffer): string {
+    return createHash("sha256").update(buffer).digest("hex");
 }
 
 /**
@@ -69,38 +67,31 @@ async function priorityFor(userId: string): Promise<number> {
  * real bound on what a free account costs to serve, which is why it is enforced
  * before `extractQueue.add` rather than anywhere later.
  *
- * The temp file is removed on refusal — multer has already written it to disk by
- * the time this runs, and every other early return in `uploadStatement` cleans up
- * the same way. Leaving it would accumulate one dead PDF per refused upload.
+ * Runs against `req.file.buffer`, before anything is written to storage — so a
+ * refusal here has nothing to clean up, unlike the old disk-backed upload where
+ * multer had already written the file by the time this ran.
  *
  * Two separate rules, and the order matters: the **count** is checked first
  * because it is the one a free user hits by simply using the product, and it
  * would be confusing to be told about multi-bank when the real answer is "you
  * have used your one upload".
  */
-async function assertUploadAllowed(userId: string, bankName: string, filePath: string): Promise<void> {
+async function assertUploadAllowed(userId: string, bankName: string): Promise<void> {
     const plan = resolvePlan(await planIdFor(userId));
-
-    const refuse = (err: Error): never => {
-        fs.unlink(filePath, () => {});
-        throw err;
-    };
 
     const cap = plan.limits.statements;
     if (cap !== null) {
         const used = await prisma.statementMetadata.count({ where: { userId } });
         if (used >= cap) {
-            refuse(
-                new PlanLimitError(
-                    "statements",
-                    cap,
-                    used,
-                    nextPlanForLimit("statements", cap),
-                    plan.id,
-                    cap === 1
-                        ? "Your plan includes one statement. Upgrade to add more."
-                        : `Your plan includes ${cap} statements.`
-                )
+            throw new PlanLimitError(
+                "statements",
+                cap,
+                used,
+                nextPlanForLimit("statements", cap),
+                plan.id,
+                cap === 1
+                    ? "Your plan includes one statement. Upgrade to add more."
+                    : `Your plan includes ${cap} statements.`
             );
         }
     }
@@ -111,13 +102,11 @@ async function assertUploadAllowed(userId: string, bankName: string, filePath: s
             select: { bankName: true },
         });
         if (other) {
-            refuse(
-                new PlanRequiredError(
-                    "multi_bank",
-                    minimumPlanFor("multi_bank"),
-                    plan.id,
-                    `Your plan covers one bank. This account already has statements from ${other.bankName}.`
-                )
+            throw new PlanRequiredError(
+                "multi_bank",
+                minimumPlanFor("multi_bank"),
+                plan.id,
+                `Your plan covers one bank. This account already has statements from ${other.bankName}.`
             );
         }
     }
@@ -132,7 +121,7 @@ async function assertUploadAllowed(userId: string, bankName: string, filePath: s
  * pay for yet.
  */
 export async function uploadStatement(
-    filePath: string,
+    buffer: Buffer,
     bankName: string | undefined,
     userId: string,
     pdfPassword?: string,
@@ -140,15 +129,19 @@ export async function uploadStatement(
     originalName?: string
 ) {
     const resolvedBankName = bankName ?? "Unknown Bank";
-    await assertUploadAllowed(userId, resolvedBankName, filePath);
+    await assertUploadAllowed(userId, resolvedBankName);
 
-    const contentHash = computeContentHash(filePath);
+    const contentHash = computeContentHash(buffer);
 
     const existing = await prisma.statementMetadata.findUnique({ where: { contentHash } });
     if (existing) {
-        fs.unlink(filePath, () => {});
         throw new ConflictError(`Statement already processed (id: ${existing.id})`, "DUPLICATE_STATEMENT");
     }
+
+    // Only written to storage once every rejection above has had its chance —
+    // an upload nobody is allowed to make never touches disk/S3 at all.
+    const storageKey = storage.keyFor("statements", `${randomUUID()}.pdf`);
+    await storage.put(storageKey, buffer, "application/pdf");
 
     const fileName = displayFileName(originalName);
     const metadata = await prisma.statementMetadata.create({
@@ -169,7 +162,7 @@ export async function uploadStatement(
         "pdf.extract",
         {
             statementId: metadata.id,
-            filePath,
+            storageKey,
             bankName: resolvedBankName,
             userId,
             pdfPassword,
@@ -221,19 +214,15 @@ async function runGraph(agent: any, input: Record<string, unknown>, onNode?: Nod
 
 /* ------------------------- the retained upload ------------------------- */
 
-const UPLOAD_DIR = path.join(process.cwd(), "uploads");
-
 /**
- * Resolve a retained basename to a real path.
- *
- * The value is written by this server and is a multer UUID, so the guard is
- * belt-and-braces — but it is the difference between a column and a file path,
- * and a column that reaches `path.join` unchecked is how directory traversal
- * happens. Anything that is not a bare, boring filename is treated as absent.
+ * `retainedFile` holds a `storage.keyFor("statements", ...)` value written by
+ * this server — never user-supplied — but validated anyway before it is handed
+ * to `storage.delete`/`storage.exists`. Deliberately loose about the exact
+ * shape (it differs by driver: an absolute local path vs. a bare S3 key) and
+ * strict about the one thing that matters: no `..` traversal.
  */
-function retainedPath(name: string): string | null {
-    if (!/^[\w.-]+$/.test(name) || name.includes("..")) return null;
-    return path.join(UPLOAD_DIR, name);
+function isPlausibleStatementKey(key: string): boolean {
+    return !key.includes("..") && /(^|[\\/])statements[\\/][\w.-]+\.pdf$/.test(key);
 }
 
 /**
@@ -245,10 +234,9 @@ export async function releaseRetainedFile(statementId: string): Promise<void> {
         where: { id: statementId },
         select: { retainedFile: true },
     });
-    if (!row?.retainedFile) return;
+    if (!row?.retainedFile || !isPlausibleStatementKey(row.retainedFile)) return;
 
-    const full = retainedPath(row.retainedFile);
-    if (full) await fs.promises.rm(full, { force: true }).catch(() => {});
+    await storage.delete(row.retainedFile).catch(() => {});
     await prisma.statementMetadata.update({
         where: { id: statementId },
         data: { retainedFile: null },
@@ -279,11 +267,15 @@ export async function unlockStatement(id: string, userId: string, password: stri
     const statement = await prisma.statementMetadata.findFirst({ where: { id, userId } });
     if (!statement) throw new NotFoundError("Statement", id);
 
-    const full = statement.retainedFile ? retainedPath(statement.retainedFile) : null;
-    if (!full || !fs.existsSync(full)) {
+    const key = statement.retainedFile && isPlausibleStatementKey(statement.retainedFile)
+        ? statement.retainedFile
+        : null;
+    const held = key ? await storage.exists(key) : false;
+    if (!key || !held) {
         // The marker outliving the file is possible — a container restart with an
-        // ephemeral `uploads/`, or a manual clean-up — so clear it rather than
-        // leaving the client to be told "retry with a password" forever.
+        // ephemeral local `uploads/`, an S3 lifecycle rule, or a manual clean-up —
+        // so clear it rather than leaving the client to be told "retry with a
+        // password" forever.
         if (statement.retainedFile) {
             await prisma.statementMetadata
                 .update({ where: { id }, data: { retainedFile: null } })
@@ -304,7 +296,7 @@ export async function unlockStatement(id: string, userId: string, password: stri
         "pdf.extract",
         {
             statementId: id,
-            filePath: full,
+            storageKey: key,
             bankName: statement.bankName,
             userId,
             pdfPassword: password,
@@ -324,7 +316,7 @@ export async function unlockStatement(id: string, userId: string, password: stri
 export async function runExtractionPipeline(
     statementId: string,
     userId: string,
-    filePath: string,
+    storageKey: string,
     bankName: string,
     pdfPassword?: string,
     onNode?: NodeProgress
@@ -333,7 +325,7 @@ export async function runExtractionPipeline(
         const agent = statementExtractGraph.compile();
         await runGraph(
             agent,
-            { userId, statementPath: filePath, bankName, pdfPassword, statementMetadataId: statementId, messages: [] },
+            { userId, statementPath: storageKey, bankName, pdfPassword, statementMetadataId: statementId, messages: [] },
             onNode
         );
     } catch (err) {
@@ -359,7 +351,7 @@ export async function runExtractionPipeline(
                      * about to delete those bytes. Leaving the marker set would
                      * have the record claim a file that no longer exists.
                      */
-                    retainedFile: isPdfPasswordError(err) ? path.basename(filePath) : null,
+                    retainedFile: isPdfPasswordError(err) ? storageKey : null,
                 },
             });
         } catch { /* ignore secondary failure */ }

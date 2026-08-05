@@ -111,15 +111,8 @@ if (previous.length > 0) {
 await extractQueue.obliterate({ force: true });
 await pdfQueue.obliterate({ force: true });
 
-// multer writes into uploads/ and the worker deletes the file when phase 1 ends,
-// so copy rather than handing over the asset itself.
-const uploads = path.join(process.cwd(), "uploads");
-fs.mkdirSync(uploads, { recursive: true });
-const filePath = path.join(uploads, `verify-${Date.now()}.pdf`);
-fs.copyFileSync(source, filePath);
-
 console.log(`\n── phase 1: upload should extract and stop ──`);
-const { statementId } = await uploadStatement(filePath, "VerifyBank", USER);
+const { statementId } = await uploadStatement(fs.readFileSync(source), "VerifyBank", USER);
 console.log(`  statement ${statementId}`);
 
 const extracted = await poll(statementId, (s) => s.extractionStatus !== "Processing");
@@ -161,7 +154,12 @@ check(
     (processCounts["waiting"] ?? 0) + (processCounts["active"] ?? 0) + (processCounts["completed"] ?? 0) === 0,
     processCounts
 );
-check("uploaded file cleaned up", !fs.existsSync(filePath));
+// This script always runs against the local storage driver (dev-only), which
+// writes statement uploads under uploads/statements/.
+const leftoverStatements = fs.existsSync(path.join(process.cwd(), "uploads", "statements"))
+    ? fs.readdirSync(path.join(process.cwd(), "uploads", "statements")).filter((f) => f.toLowerCase().endsWith(".pdf"))
+    : [];
+check("uploaded file cleaned up", leftoverStatements.length === 0, leftoverStatements);
 
 console.log(`\n── decline is recorded, reversible, and starts nothing ──`);
 await declineProcessing(statementId, USER, "verify script");

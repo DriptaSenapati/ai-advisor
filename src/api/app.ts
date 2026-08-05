@@ -18,6 +18,23 @@ import { extractQueue, pdfQueue, insightsQueue, goalQueue } from "../queue/index
 
 const app = express();
 
+/**
+ * Trust exactly one hop of `X-Forwarded-For` — the reverse proxy/load balancer
+ * every real deployment sits behind (nginx, a PaaS's edge, Cloudflare, ...).
+ *
+ * Without this, `express-rate-limit`@8 throws at request time the moment such a
+ * proxy forwards that header: "The 'X-Forwarded-For' header is set but the
+ * Express 'trust proxy' setting is false", which took every rate-limited route
+ * down in front of any real proxy. It also makes `req.secure`/`req.ip` resolve
+ * from the forwarded values instead of the proxy's own, which `helmet` and
+ * better-auth's `Secure` cookie detection both depend on being correct.
+ *
+ * `1` means "trust the nearest proxy only" — right for a single load balancer
+ * in front of the API. Raise it only if another hop is added between the
+ * client and that first proxy.
+ */
+app.set("trust proxy", 1);
+
 app.use(
     helmet({
         contentSecurityPolicy: {

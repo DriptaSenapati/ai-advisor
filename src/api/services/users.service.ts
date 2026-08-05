@@ -1,8 +1,8 @@
-import fs from "fs/promises";
-import path from "path";
+import { randomUUID } from "crypto";
 import prisma from "../../prismaClient.js";
 import { NotFoundError } from "../errors.js";
-import { AVATAR_DIR } from "../middleware/upload.js";
+import { storage } from "../../lib/storage.js";
+import { AVATAR_MIME_EXTENSIONS } from "../middleware/upload.js";
 import { planIdFor } from "../middleware/entitlement.js";
 import { resolvePlan } from "../../config/plans.js";
 
@@ -12,33 +12,37 @@ import { resolvePlan } from "../../config/plans.js";
  * `User.image` holds an **absolute URL**, which is the shape better-auth already
  * writes there when someone signs in with Google. Keeping ours the same means
  * the client renders both sources through one code path and never has to ask
- * where a picture came from.
- *
- * The cost of absolute URLs is that they embed this API's public origin, so
- * moving the API to a different host orphans previously-stored avatars (Google's
- * keep working — they point at Google). That is a deployment-time migration, not
- * a runtime concern, and it buys the single-code-path property above.
+ * where a picture came from. `storage.publicUrl()` produces that URL — the API's
+ * own origin + `/avatars/<file>` on local disk, the bucket's own domain on S3 —
+ * and this module never needs to know which.
  */
 
-const AVATAR_ROUTE = "/avatars";
+/**
+ * Extract the storage key from a URL this API generated, or `null` if it is not
+ * one of ours (a Google URL, most likely). Rebuilding the expected URL from the
+ * candidate key and comparing is what makes this driver-agnostic: a local URL's
+ * origin is this API's own, an S3 URL's is the bucket's, and only
+ * `storage.publicUrl()` knows which is currently active.
+ */
+function avatarKeyFromUrl(image: string | null): string | null {
+    if (!image) return null;
 
-/** The API's own public origin — the same value better-auth derives its base from. */
-function publicOrigin(): string {
-    return (process.env.BETTER_AUTH_URL || `http://localhost:${process.env.PORT || 3001}`).replace(/\/+$/, "");
-}
+    let pathname: string;
+    try {
+        pathname = new URL(image).pathname;
+    } catch {
+        return null;
+    }
 
-export function avatarUrl(filename: string): string {
-    return `${publicOrigin()}${AVATAR_ROUTE}/${filename}`;
+    const filename = pathname.split("/").pop() ?? "";
+    if (!/^[\w-]+\.(jpg|png|webp)$/.test(filename)) return null;
+
+    const key = storage.keyFor("avatars", filename);
+    return storage.publicUrl(key) === image ? key : null;
 }
 
 /**
- * Delete a previously stored avatar file, if the URL is one of ours.
- *
- * **The origin check is the point.** `User.image` may hold a Google URL, and
- * this must never try to interpret that as a local path. The filename is also
- * re-derived with `path.basename` and required to look like a generated one, so
- * a value that somehow arrived with `../` in it resolves to a harmless leaf
- * rather than escaping `uploads/avatars`.
+ * Delete a previously stored avatar, if the URL is one of ours.
  *
  * A failure here is logged and swallowed: the user asked to change their
  * picture, and refusing to do so because an old file could not be removed would
@@ -46,17 +50,13 @@ export function avatarUrl(filename: string): string {
  * orphaned file.
  */
 async function removeStoredAvatar(image: string | null): Promise<void> {
-    if (!image) return;
-    if (!image.startsWith(`${publicOrigin()}${AVATAR_ROUTE}/`)) return;
-
-    const filename = path.basename(new URL(image).pathname);
-    if (!/^[\w-]+\.(jpg|png|webp|bin)$/.test(filename)) return;
+    const key = avatarKeyFromUrl(image);
+    if (!key) return;
 
     try {
-        await fs.unlink(path.join(AVATAR_DIR, filename));
+        await storage.delete(key);
     } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code !== "ENOENT") console.error(`[Users] could not remove old avatar ${filename}:`, err);
+        console.error(`[Users] could not remove old avatar ${key}:`, err);
     }
 }
 
@@ -67,9 +67,14 @@ async function requireUser(userId: string) {
 }
 
 /** Store a freshly uploaded file as this user's picture, replacing any previous one. */
-export async function setAvatar(userId: string, filename: string) {
+export async function setAvatar(userId: string, buffer: Buffer, mimetype: string) {
     const existing = await requireUser(userId);
-    const image = avatarUrl(filename);
+
+    // multer's fileFilter has already rejected anything not in this map.
+    const ext = AVATAR_MIME_EXTENSIONS[mimetype] ?? "bin";
+    const key = storage.keyFor("avatars", `${randomUUID()}.${ext}`);
+    await storage.put(key, buffer, mimetype);
+    const image = storage.publicUrl(key);
 
     const updated = await prisma.user.update({
         where: { id: userId },

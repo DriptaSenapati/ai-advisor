@@ -16,13 +16,14 @@ export const goalQueue     = new Queue("goal.analyze",      { connection, defaul
  * Phase 1 of an upload: read the PDF and stop.
  *
  * Its own queue rather than a `phase` field on one job, because the two halves
- * genuinely differ: this one is short, holds a file on disk that has to be
+ * genuinely differ: this one is short, holds a file in storage that has to be
  * cleaned up, and retries cheaply. `pdf.process` is the multi-minute LLM run
  * that needs the 10-minute lock.
  */
 export interface ExtractJobData {
     statementId: string;
-    filePath: string;
+    /** A key into `storage` (`src/lib/storage.ts`) — local path or S3 key, driver-dependent. */
+    storageKey: string;
     bankName: string;
     userId: string;
     pdfPassword?: string;
@@ -31,7 +32,7 @@ export interface ExtractJobData {
 /**
  * Phase 2: everything after the user presses Illuminate.
  *
- * Carries no `filePath` on purpose — `statementPath` is read only by
+ * Carries no `storageKey` on purpose — `statementPath` is read only by
  * `pdfExtractorNode`, so by this point the upload has already been deleted and
  * every downstream node reads from the database instead.
  */
