@@ -8,6 +8,9 @@ import transactionsRouter from "./transactions.routes.js";
 import recurringRouter from "./recurring.routes.js";
 import usersRouter from "./users.routes.js";
 import plansRouter from "./plans.routes.js";
+import contentRouter from "./content.routes.js";
+import testimonialsRouter from "./testimonials.routes.js";
+import uatRouter from "./uat.routes.js";
 
 const router = Router();
 
@@ -41,6 +44,22 @@ router.get("/health", (_req: Request, res: Response) => {
  * this endpoint exists to remove.
  */
 router.use("/plans", plansRouter);
+
+/**
+ * Curated marketing copy — public like `/plans`, for the same reason: the
+ * marketing site has no session, and this is what an admin-editable hero
+ * headline/CTA/footer blurb renders from instead of a hardcoded string.
+ */
+router.use("/content", contentRouter);
+router.use("/testimonials", testimonialsRouter);
+
+/**
+ * UAT testing surface — public like `/plans`, entirely gated internally by
+ * UAT_TESTING_FLAG (src/config/uat.ts). Every route here 404s unconditionally
+ * when the flag is off, rather than being un-mounted, so a stale bookmark
+ * gets a clean 404 instead of a route that doesn't exist at the Express level.
+ */
+router.use("/uat", uatRouter);
 
 /**
  * Two routers are gated whole, at the mount, because every endpoint under them

@@ -175,8 +175,11 @@ const pdfExtractorToolNode: GraphNode<typeof agentGraphSchema> = async (state) =
             metadataId = state.statementMetadataId;
             console.log(`[PDF Extractor] Using pre-created StatementMetadata (id: ${metadataId})`);
         } else {
-            // CLI flow: full dedup check + create
-            const existing = await prisma.statementMetadata.findUnique({ where: { contentHash } });
+            // CLI flow: full dedup check + create. No session here, so there is no
+            // `userId` to scope by — `contentHash` alone is no longer a unique
+            // selector (see the schema's docblock), hence `findFirst` rather than
+            // `findUnique`.
+            const existing = await prisma.statementMetadata.findFirst({ where: { contentHash } });
             if (existing) {
                 console.warn(`[PDF Extractor] Duplicate detected (id: ${existing.id}). Aborting.`);
                 throw new Error(`Duplicate statement upload: already processed (StatementMetadata id: ${existing.id}).`);

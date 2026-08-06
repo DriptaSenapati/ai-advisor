@@ -11,6 +11,7 @@ import { globalLimiter } from "./middleware/rateLimiter.js";
 import { errorHandler } from "./middleware/errorHandler.js";
 import { requireAuth } from "./middleware/authenticate.js";
 import router from "./routes/index.js";
+import adminRouter from "./admin/routes/admin.routes.js";
 import { createBullBoard } from "@bull-board/api";
 import { ExpressAdapter } from "@bull-board/express";
 import { BullMQAdapter } from "@bull-board/api/bullMQAdapter";
@@ -111,6 +112,14 @@ app.use(
     })
 );
 
+/**
+ * Mounted before the general `/api/v1` router, and deliberately so: this
+ * router owns its own authentication (`requireAdminAuth`, a JWT cookie tied to
+ * a single hardcoded admin account) rather than better-auth's `requireAuth`.
+ * Its routes live in `./admin/`, a directory `swagger.ts`'s glob never scans,
+ * so none of this appears in `/api/spec.json` or `/api/docs`.
+ */
+app.use("/api/v1/admin", adminRouter);
 app.use("/api/v1", router);
 
 // Swagger docs

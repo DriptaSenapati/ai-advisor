@@ -23,6 +23,7 @@ import { triggerGoalAnalysis } from "./modules/goalManager.js";
 import { planIdFor } from "./api/middleware/entitlement.js";
 import { jobPriorityFor } from "./config/plans.js";
 import prisma from "./prismaClient.js";
+import { logJobStart, logJobFinish, logJobFail } from "./lib/adminJobLog.js";
 
 const workerOpts = { connection };
 
@@ -153,6 +154,9 @@ extractWorker.on("completed", async (job) => {
     // case where a file was deliberately kept. Clearing the marker alongside the
     // delete is what stops `POST /unlock` offering a file that is no longer there.
     await releaseRetainedFile(job.data.statementId).catch(() => {});
+    await logJobFinish(job.id ?? job.data.statementId, "pdf.extract").catch((err) =>
+        console.error("[AdminJobLog] failed to log job finish:", err)
+    );
     console.log(`[Worker] pdf.extract completed: ${job.data.statementId} — awaiting user confirmation`);
 });
 
@@ -175,6 +179,11 @@ extractWorker.on("failed", async (job, err) => {
             await storage.delete(job.data.storageKey).catch(() => {});
         }
         await publishFailure(job?.data.userId, "extract_failed", err, { statementId: job?.data.statementId });
+        if (job) {
+            await logJobFail(job.id ?? job.data.statementId, "pdf.extract", err.message).catch((e) =>
+                console.error("[AdminJobLog] failed to log job fail:", e)
+            );
+        }
     }
     console.error(`[Worker] pdf.extract failed (attempt ${job?.attemptsMade}):`, err.message);
 });
@@ -192,11 +201,18 @@ const pdfWorker = new Worker<PdfJobData>(
         // explicit priority is processed *ahead* of prioritized ones in BullMQ, so
         // omitting it here would let a free account's insights run overtake a
         // Radiant one — see `jobPriorityFor` in config/plans.ts.
-        await insightsQueue.add(
+        const insightsJob = await insightsQueue.add(
             "insights.generate",
             { userId, statementId },
             { priority: jobPriorityFor(await planIdFor(userId)) }
         );
+        await logJobStart({
+            jobType: "insights.generate",
+            jobId: insightsJob.id ?? statementId,
+            userId,
+            statementMetadataId: statementId,
+            triggerSource: "auto-chain",
+        }).catch((err) => console.error("[AdminJobLog] failed to log job start:", err));
         await publishStatementProgress(userId, statementId, "insights_queued", 95);
     },
     {
@@ -208,13 +224,21 @@ const pdfWorker = new Worker<PdfJobData>(
 );
 
 // No file to clean up — this job never had one in its payload.
-pdfWorker.on("completed", (job) =>
-    console.log(`[Worker] pdf.process completed: ${job.data.statementId}`)
-);
+pdfWorker.on("completed", async (job) => {
+    await logJobFinish(job.id ?? job.data.statementId, "pdf.process").catch((err) =>
+        console.error("[AdminJobLog] failed to log job finish:", err)
+    );
+    console.log(`[Worker] pdf.process completed: ${job.data.statementId}`);
+});
 
 pdfWorker.on("failed", async (job, err) => {
     if (isFinalAttempt(job)) {
         await publishFailure(job?.data.userId, "failed", err, { statementId: job?.data.statementId });
+        if (job) {
+            await logJobFail(job.id ?? job.data.statementId, "pdf.process", err.message).catch((e) =>
+                console.error("[AdminJobLog] failed to log job fail:", e)
+            );
+        }
     }
     console.error(`[Worker] pdf.process failed (attempt ${job?.attemptsMade}):`, err.message);
 });
@@ -257,11 +281,17 @@ async function requeueActiveGoals(userId: string): Promise<void> {
     const priority = jobPriorityFor(await planIdFor(userId));
     for (const g of goals) {
         await publish(userId, { stage: "goal_queued", goalId: g.id });
-        await goalQueue.add(
+        const job = await goalQueue.add(
             "goal.analyze",
             { goalId: g.id, userId, allowStaleData: resolveAllowStaleData() },
             { priority }
         );
+        await logJobStart({
+            jobType: "goal.analyze",
+            jobId: job.id ?? g.id,
+            userId,
+            triggerSource: "auto-chain",
+        }).catch((err) => console.error("[AdminJobLog] failed to log job start:", err));
     }
 }
 
@@ -312,15 +342,23 @@ const insightsWorker = new Worker<InsightsJobData>(
     { ...workerOpts, concurrency: 1 }
 );
 
-insightsWorker.on("completed", (job) =>
-    console.log(`[Worker] insights.generate completed: statementId=${job.data.statementId}`)
-);
+insightsWorker.on("completed", async (job) => {
+    await logJobFinish(job.id ?? job.data.userId, "insights.generate").catch((err) =>
+        console.error("[AdminJobLog] failed to log job finish:", err)
+    );
+    console.log(`[Worker] insights.generate completed: statementId=${job.data.statementId}`);
+});
 insightsWorker.on("failed", async (job, err) => {
     if (isFinalAttempt(job)) {
         // statementId is absent on a full recompute — an account-level event.
         await publishFailure(job?.data.userId, "insights_failed", err, {
             ...(job?.data.statementId ? { statementId: job.data.statementId } : {}),
         });
+        if (job) {
+            await logJobFail(job.id ?? job.data.userId, "insights.generate", err.message).catch((e) =>
+                console.error("[AdminJobLog] failed to log job fail:", e)
+            );
+        }
     }
     console.error(`[Worker] insights.generate failed (attempt ${job?.attemptsMade}):`, err.message);
 });
@@ -368,12 +406,20 @@ const goalWorker = new Worker<GoalJobData>(
     { ...workerOpts, concurrency: 3 }
 );
 
-goalWorker.on("completed", (job) =>
-    console.log(`[Worker] goal.analyze completed: ${job.data.goalId}`)
-);
+goalWorker.on("completed", async (job) => {
+    await logJobFinish(job.id ?? job.data.goalId, "goal.analyze").catch((err) =>
+        console.error("[AdminJobLog] failed to log job finish:", err)
+    );
+    console.log(`[Worker] goal.analyze completed: ${job.data.goalId}`);
+});
 goalWorker.on("failed", async (job, err) => {
     if (isFinalAttempt(job)) {
         await publishFailure(job?.data.userId, "goal_failed", err, { goalId: job?.data.goalId });
+        if (job) {
+            await logJobFail(job.id ?? job.data.goalId, "goal.analyze", err.message).catch((e) =>
+                console.error("[AdminJobLog] failed to log job fail:", e)
+            );
+        }
     }
     console.error(`[Worker] goal.analyze failed (attempt ${job?.attemptsMade}):`, err.message);
 });

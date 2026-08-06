@@ -27,7 +27,7 @@ export interface FileStorage {
     /** Only meaningful for `"avatars"` keys — statements are never public. */
     publicUrl(key: string): string;
     /** Builds a fresh, driver-appropriate key for a new upload of the given kind. */
-    keyFor(kind: "statements" | "avatars", filename: string): string;
+    keyFor(kind: "statements" | "avatars" | "uat", filename: string): string;
 }
 
 function publicOrigin(): string {
@@ -81,7 +81,7 @@ class LocalFileStorage implements FileStorage {
         return `${publicOrigin()}/avatars/${path.basename(key)}`;
     }
 
-    keyFor(kind: "statements" | "avatars", filename: string): string {
+    keyFor(kind: "statements" | "avatars" | "uat", filename: string): string {
         return path.join(process.cwd(), "uploads", kind, filename);
     }
 }
@@ -147,7 +147,7 @@ class S3FileStorage implements FileStorage {
         return `https://${this.bucket}.s3.${process.env["AWS_REGION"]}.amazonaws.com/${key}`;
     }
 
-    keyFor(kind: "statements" | "avatars", filename: string): string {
+    keyFor(kind: "statements" | "avatars" | "uat", filename: string): string {
         return `${kind}/${filename}`;
     }
 }

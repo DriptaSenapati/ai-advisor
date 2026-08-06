@@ -61,3 +61,15 @@ export const analyzeLimiter = rateLimit({
     legacyHeaders: false,
     message: fmt("ANALYZE_RATE_LIMITED", "Goal analysis limit (10/hour) exceeded"),
 });
+
+/**
+ * Guards `POST /admin/auth/login` specifically — the highest-value
+ * brute-force target in the admin panel, tighter than every limiter above.
+ */
+export const adminLoginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    message: fmt("ADMIN_LOGIN_RATE_LIMITED", "Too many login attempts, please try again later"),
+});

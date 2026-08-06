@@ -7,6 +7,7 @@ import { extractQueue, pdfQueue } from "../../queue/index.js";
 import { planIdFor } from "../middleware/entitlement.js";
 import { jobPriorityFor, minimumPlanFor, nextPlanForLimit, resolvePlan } from "../../config/plans.js";
 import { storage } from "../../lib/storage.js";
+import { logJobStart } from "../../lib/adminJobLog.js";
 import {
     listUserProgress,
     publishStatementProgress,
@@ -133,7 +134,12 @@ export async function uploadStatement(
 
     const contentHash = computeContentHash(buffer);
 
-    const existing = await prisma.statementMetadata.findUnique({ where: { contentHash } });
+    // Scoped to this user, not global — two different people (a joint account,
+    // or an identical UAT sample PDF) can legitimately hold the same bytes, and
+    // each must be able to upload their own copy. See the schema's docblock.
+    const existing = await prisma.statementMetadata.findUnique({
+        where: { userId_contentHash: { userId, contentHash } },
+    });
     if (existing) {
         throw new ConflictError(`Statement already processed (id: ${existing.id})`, "DUPLICATE_STATEMENT");
     }
@@ -158,7 +164,7 @@ export async function uploadStatement(
         },
     });
 
-    await extractQueue.add(
+    const extractJob = await extractQueue.add(
         "pdf.extract",
         {
             statementId: metadata.id,
@@ -169,6 +175,13 @@ export async function uploadStatement(
         },
         { priority: await priorityFor(userId) }
     );
+    await logJobStart({
+        jobType: "pdf.extract",
+        jobId: extractJob.id ?? metadata.id,
+        userId,
+        statementMetadataId: metadata.id,
+        triggerSource: "user-upload",
+    }).catch((err) => console.error("[AdminJobLog] failed to log job start:", err));
 
     return { statementId: metadata.id, status: "Queued" };
 }
@@ -292,7 +305,7 @@ export async function unlockStatement(id: string, userId: string, password: stri
         data: { extractionStatus: "Processing", extractionError: null },
     });
 
-    await extractQueue.add(
+    const unlockJob = await extractQueue.add(
         "pdf.extract",
         {
             statementId: id,
@@ -303,6 +316,13 @@ export async function unlockStatement(id: string, userId: string, password: stri
         },
         { priority: await priorityFor(userId) }
     );
+    await logJobStart({
+        jobType: "pdf.extract",
+        jobId: unlockJob.id ?? id,
+        userId,
+        statementMetadataId: id,
+        triggerSource: "user-action",
+    }).catch((err) => console.error("[AdminJobLog] failed to log job start:", err));
 
     // Same reason `insights_queued` and `goal_queued` exist: between this response
     // and the worker picking the job up there would otherwise be no frame at all,
@@ -544,11 +564,18 @@ export async function startProcessing(id: string, userId: string) {
     }
 
     await recordGateDecision(statement, userId, "approved");
-    await pdfQueue.add(
+    const processJob = await pdfQueue.add(
         "pdf.process",
         { statementId: id, userId },
         { priority: await priorityFor(userId) }
     );
+    await logJobStart({
+        jobType: "pdf.process",
+        jobId: processJob.id ?? id,
+        userId,
+        statementMetadataId: id,
+        triggerSource: "user-action",
+    }).catch((err) => console.error("[AdminJobLog] failed to log job start:", err));
 
     /**
      * Announce the gate opening from here rather than waiting for the worker.

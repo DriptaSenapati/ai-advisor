@@ -24,6 +24,7 @@ const options: swaggerJsDoc.Options = {
             { name: "Goals", description: "Financial goal management and Monte Carlo analysis" },
             { name: "Transactions", description: "Transaction browsing and aggregations" },
             { name: "Recurring", description: "Detected recurring debits and periodic income" },
+            { name: "Content", description: "Curated marketing copy" },
         ],
         components: {
             securitySchemes: {

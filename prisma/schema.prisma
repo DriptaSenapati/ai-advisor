@@ -382,6 +382,63 @@ model StatementGateDecision {
   createdAt           DateTime           @default(now())
 }
 
+/// Durable job-level history for the admin panel. Bull Board/Redis only holds
+/// job state ephemerally — this is the only persisted record that a job ran at
+/// all. One row per BullMQ *attempt* (job.id is reused across retries), written
+/// at enqueue time and updated by the worker's completed/failed handlers.
+model AdminJobLog {
+  id                  String    @id @default(auto()) @map("_id") @db.ObjectId
+  jobType             String // "pdf.extract" | "pdf.process" | "insights.generate" | "goal.analyze"
+  jobId               String // BullMQ job.id — correlates back to Bull Board
+  userId              String?
+  statementMetadataId String?   @db.ObjectId
+  status              String // "started" | "completed" | "failed"
+  triggerSource       String // "user-upload" | "user-action" | "auto-chain" | "system-requeue"
+  startedAt           DateTime
+  finishedAt          DateTime?
+  error               String?
+  createdAt           DateTime  @default(now())
+
+  @@index([jobType, status])
+  @@index([userId])
+  @@index([statementMetadataId])
+}
+
+/// Curated marketing copy, admin-editable, publicly readable via GET /content.
+/// A fixed key vocabulary, not a generic CMS. A missing row for a key means
+/// "render the component's own hardcoded default" — the marketing site cannot
+/// break because this collection is empty.
+model SiteContent {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  /// "hero.headline" | "hero.subhead" | "hero.cta" | "nav.features" |
+  /// "nav.howItWorks" | "nav.security" | "nav.pricing" | "footer.blurb" |
+  /// "cta.heading" | "cta.body" | "cta.buttonLabel"
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+  updatedBy String // "admin" — audit trail only, not access control
+}
+
+/// Marketing testimonials, admin-editable, publicly readable via GET
+/// /testimonials. A list rather than a SiteContent key/value, since each
+/// entry is a small structured record, not a single string.
+model Testimonial {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  quote     String
+  name      String
+  role      String
+  initials  String
+  /// One of the six CSS variables already re-pointed for dark mode that the
+  /// default testimonials use — see the picker in the admin form.
+  bg        String
+  /// Display order, ascending. Ties broken by createdAt.
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([order])
+}
+
 model StatementMetadata {
   id                     String                   @id @default(auto()) @map("_id") @db.ObjectId
   userId                 String?
@@ -402,7 +459,13 @@ model StatementMetadata {
   accountNumber          String?
   statementPeriodStart   DateTime?
   statementPeriodEnd     DateTime?
-  contentHash            String                   @unique
+  /// Dedup key — unique per user, not globally. Two different users legitimately
+  /// holding the same statement (a joint account, or an identical UAT sample PDF)
+  /// must each be able to upload it; a global unique index rejected the second
+  /// person with a 409 naming a statement id belonging to an account they can't
+  /// see. See "Known Bugs" in CLAUDE.md — this was already documented and is now
+  /// fixed rather than merely noted.
+  contentHash            String
   keyMapping             Json?
   extractedData          StatementExtractedData?
   totalTransactions      Int?
@@ -434,4 +497,6 @@ model StatementMetadata {
   extractionConfidence   Float?
   createdAt              DateTime                 @default(now())
   updatedAt              DateTime                 @updatedAt
+
+  @@unique([userId, contentHash])
 }
