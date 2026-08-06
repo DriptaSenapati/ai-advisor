@@ -67,6 +67,11 @@ model FinalTransactionData {
   updatedAt           DateTime           @updatedAt
 
   @@index([userId, date])
+  /// Backs the per-statement affected-months query in stats_aggregator_tool_node.ts —
+  /// grouping this statement's own transactions by month, rather than trusting the
+  /// vision-guessed statementPeriodStart/End (page 1 only, wrong for anything whose
+  /// last transaction is on a later page).
+  @@index([statementMetadataId])
 }
 
 model Cluster {

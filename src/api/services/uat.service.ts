@@ -9,7 +9,7 @@ export function getConfig() {
 
 export function listTestPdfs() {
     if (!UAT_ENABLED) throw new NotFoundError("UAT test PDFs");
-    return UAT_TEST_PDFS.map(({ id, label, passwordProtected }) => ({ id, label, passwordProtected }));
+    return UAT_TEST_PDFS.map(({ id, label, passwordProtected, months }) => ({ id, label, passwordProtected, months }));
 }
 
 export async function downloadTestPdf(id: string): Promise<{ buffer: Buffer; filename: string }> {

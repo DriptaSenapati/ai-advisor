@@ -26,11 +26,15 @@ export interface UatTestPdf {
     label: string;
     filename: string;
     passwordProtected: boolean;
+    /** Shown in the picker so a tester can pick a statement long enough for the
+     *  feature they want to try — the goal simulator needs 6+ months, for one. */
+    months: number;
 }
 
 export const UAT_TEST_PDFS: UatTestPdf[] = [
-    { id: "salaried-savings", label: "Salaried — savings account", filename: "uat-salaried-savings.pdf", passwordProtected: false },
-    { id: "freelancer-mixed", label: "Freelancer — variable income", filename: "uat-freelancer-mixed.pdf", passwordProtected: false },
-    { id: "family-joint", label: "Family — joint account (locked)", filename: "uat-family-joint.pdf", passwordProtected: true },
-    { id: "small-business", label: "Small business owner (locked)", filename: "uat-small-business.pdf", passwordProtected: true },
+    { id: "salaried-savings", label: "Salaried — savings account", filename: "uat-salaried-savings.pdf", passwordProtected: false, months: 7 },
+    { id: "freelancer-mixed", label: "Freelancer — variable income", filename: "uat-freelancer-mixed.pdf", passwordProtected: false, months: 7 },
+    { id: "family-joint", label: "Family — joint account (locked)", filename: "uat-family-joint.pdf", passwordProtected: true, months: 7 },
+    { id: "small-business", label: "Small business owner (locked)", filename: "uat-small-business.pdf", passwordProtected: true, months: 7 },
+    { id: "annual-overview", label: "Full year, high activity", filename: "uat-annual-overview.pdf", passwordProtected: false, months: 12 },
 ];

@@ -1,5 +1,5 @@
 /**
- * Generates the 4 UAT sample statement PDFs and writes them through the
+ * Generates the 5 UAT sample statement PDFs and writes them through the
  * storage abstraction (src/lib/storage.ts) under the "uat" kind — not to a
  * local assets/ folder, since prod's .dockerignore excludes assets/ entirely
  * and prod runs STORAGE_DRIVER=s3. Two files are re-saved encrypted via
@@ -56,10 +56,9 @@ function fmtAmount(n: number): string {
     return n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/** Builds ~85 rows spanning 7 months, ending "today", with a consistent running balance. */
-function buildRows(rng: () => number, monthlyIncome: number, incomeCv: number, openingBalance: number): Row[] {
+/** Builds rows spanning `months` months, ending "today", with a consistent running balance. */
+function buildRows(rng: () => number, monthlyIncome: number, incomeCv: number, openingBalance: number, months: number): Row[] {
     const rows: Row[] = [];
-    const months = 7;
     const end = new Date();
     const start = new Date(end.getFullYear(), end.getMonth() - months + 1, 1);
 
@@ -200,6 +199,11 @@ const PROFILES: Record<string, { bank: string; account: string; income: number; 
     "freelancer-mixed": { bank: "Coastal Trust Bank", account: "Savings A/C ...7734", income: 45000, cv: 0.45, opening: 18000 },
     "family-joint": { bank: "Horizon Bank", account: "Joint A/C ...1190", income: 92000, cv: 0.05, opening: 65000 },
     "small-business": { bank: "Meridian Bank", account: "Current A/C ...5502", income: 58000, cv: 0.55, opening: 30000 },
+    // 12 months at the same per-month density as every other profile (~12/month)
+    // comfortably clears 100 transactions on its own, so testers have a statement
+    // that exercises every month-count-gated feature — the goal simulator's
+    // 6-month floor included — with real headroom.
+    "annual-overview": { bank: "Prosperity National Bank", account: "Savings A/C ...9034", income: 75000, cv: 0.12, opening: 55000 },
 };
 
 async function main(): Promise<void> {
@@ -209,7 +213,7 @@ async function main(): Promise<void> {
 
         const seed = [...pdf.id].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
         const rng = mulberry32(seed);
-        const rows = buildRows(rng, profile.income, profile.cv, profile.opening) as (Row & { balance: number })[];
+        const rows = buildRows(rng, profile.income, profile.cv, profile.opening, pdf.months) as (Row & { balance: number })[];
 
         let buffer = await renderPdf(rows, profile.bank, profile.account);
         if (pdf.passwordProtected) {

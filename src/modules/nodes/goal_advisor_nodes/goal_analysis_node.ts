@@ -428,6 +428,31 @@ const goalAnalysisNode: GraphNode<typeof goalAdvisorGraphSchema> = async (state)
     if (allStats.length === 0) {
         throw new Error("[GoalAdvisor] No MonthlyStats found. Run the stats pipeline first.");
     }
+
+    /**
+     * Step 3a: Minimum-history guard.
+     *
+     * There used to be no floor here at all — one month of data was enough to run a full Monte
+     * Carlo and print a confident-looking probability. Distribution fitting already treats n<6
+     * as too thin for a normal fit and falls back to bootstrap resampling (see Step 4 below),
+     * which is itself an admission that six months is where this simulation's inputs start being
+     * trustworthy. Refusing outright below that, the same way the freshness check refuses stale
+     * data, is more honest than quietly downgrading the method and still handing back a number.
+     */
+    const MIN_GOAL_SIM_MONTHS = 6;
+    if (allStats.length < MIN_GOAL_SIM_MONTHS) {
+        const result = {
+            computedAt: now.toISOString(),
+            pastDeadline: false,
+            insufficientHistory: true,
+            monthsOfData: allStats.length,
+            monthsRequired: MIN_GOAL_SIM_MONTHS,
+            llmOutput: null,
+        };
+        await prisma.goal.update({ where: { id: goalId }, data: { simulationResult: result as any } });
+        return { goalAnalysisResult: result };
+    }
+
     const activePatterns = await prisma.recurringPattern.findMany({ where: { userId, isActive: true, OR: [{ type: "debit" }, { type: null }] } });
 
     // Step 3b: Data freshness check

@@ -18,12 +18,21 @@ import { computeMean } from "../stats/robust.js";
  *   contributions, not spend).
  * - Net savings — more money kept is the improvement, same as every category except that one.
  *
- * Both compare the mean of the most recent `RECENT_MONTHS` months against the mean of every
- * month before them, and only a candidate with **both** a real ₹ size and a real relative size
- * counts — a category that moved from ₹50 to ₹150 a month is a 200% change and financially
- * nothing at all. Whichever candidate improved the most becomes "good"; whichever worsened the
- * most becomes "bad". Either can come back `null` — an account with nothing that clearly
- * improved, or nothing that clearly worsened, gets silence instead of a manufactured claim.
+ * Both compare the mean of the most recent window against the mean of every month before it,
+ * and only a candidate with **both** a real ₹ size and a real relative size counts — a category
+ * that moved from ₹50 to ₹150 a month is a 200% change and financially nothing at all. Whichever
+ * candidate improved the most becomes "good"; whichever worsened the most becomes "bad". Either
+ * can come back `null` — an account with nothing that clearly improved, or nothing that clearly
+ * worsened, gets silence instead of a manufactured claim.
+ *
+ * **The recent window itself has two tiers, so a newer account isn't silent for months longer
+ * than it has to be.** At `LONG_FLOOR` (8) months or more, "recent" is the last `LONG_WINDOW` (6)
+ * against everything before — the original comparison, kept because six months is long enough
+ * that both halves are a real season, not a handful of transactions either way. Between
+ * `SHORT_FLOOR` (5) and `LONG_FLOOR` months, "recent" narrows to the last `SHORT_WINDOW` (3)
+ * against whatever's left — still at least 2 prior months to compare against, the same floor the
+ * 6-month tier keeps. Below `SHORT_FLOOR`, there is no honest "before" left to compare against at
+ * all, and both cards stay `null` rather than comparing 3 months against 1 or 2.
  */
 
 export interface TrendHighlight {
@@ -46,11 +55,23 @@ function categoriesOf(row: MonthlyStatsRow): CategoryRow[] {
     return Array.isArray(row.categoryBreakdown) ? (row.categoryBreakdown as CategoryRow[]) : [];
 }
 
-const RECENT_MONTHS = 6;
+const LONG_WINDOW = 6;
+const LONG_FLOOR = LONG_WINDOW + 2;
+const SHORT_WINDOW = 3;
+const SHORT_FLOOR = 5;
+
 /** A candidate must clear both bars to count — small money moving a lot, or big money moving
     a little, are both noise for this purpose. */
 const MIN_ABSOLUTE_DELTA = 500;
 const MIN_RELATIVE_DELTA = 0.15;
+
+/** Which recent-window size applies, or `null` when even the short tier has no honest
+    "before" to compare against. Exported so a test can assert the tier boundary directly. */
+export function recentWindowFor(totalMonths: number): number | null {
+    if (totalMonths >= LONG_FLOOR) return LONG_WINDOW;
+    if (totalMonths >= SHORT_FLOOR) return SHORT_WINDOW;
+    return null;
+}
 
 interface Candidate {
     label: string;
@@ -61,30 +82,31 @@ interface Candidate {
     improvement: number;
 }
 
-function sentenceFor(c: Candidate, direction: "good" | "bad"): string {
+function sentenceFor(c: Candidate, direction: "good" | "bad", window: number): string {
     const fmt = (n: number) => `₹${Math.round(Math.abs(n)).toLocaleString("en-IN")}`;
     if (c.kind === "net_savings") {
         return direction === "good"
-            ? `Your net monthly savings have improved from ${fmt(c.priorAvg)} to ${fmt(c.recentAvg)} over the last ${RECENT_MONTHS} months — real progress against where things stood before.`
-            : `Your net monthly savings have slipped from ${fmt(c.priorAvg)} to ${fmt(c.recentAvg)} over the last ${RECENT_MONTHS} months — worse than the months before that.`;
+            ? `Your net monthly savings have improved from ${fmt(c.priorAvg)} to ${fmt(c.recentAvg)} over the last ${window} months — real progress against where things stood before.`
+            : `Your net monthly savings have slipped from ${fmt(c.priorAvg)} to ${fmt(c.recentAvg)} over the last ${window} months — worse than the months before that.`;
     }
     const risingIsGood = c.label === "Finance & Investments";
     const rose = c.recentAvg > c.priorAvg;
     if (risingIsGood) {
         return direction === "good"
-            ? `${c.label} contributions have grown from ${fmt(c.priorAvg)}/mo to ${fmt(c.recentAvg)}/mo over the last ${RECENT_MONTHS} months.`
-            : `${c.label} contributions have dropped from ${fmt(c.priorAvg)}/mo to ${fmt(c.recentAvg)}/mo over the last ${RECENT_MONTHS} months — investing less than before.`;
+            ? `${c.label} contributions have grown from ${fmt(c.priorAvg)}/mo to ${fmt(c.recentAvg)}/mo over the last ${window} months.`
+            : `${c.label} contributions have dropped from ${fmt(c.priorAvg)}/mo to ${fmt(c.recentAvg)}/mo over the last ${window} months — investing less than before.`;
     }
     return direction === "good"
-        ? `${c.label} spending has fallen from ${fmt(c.priorAvg)}/mo to ${fmt(c.recentAvg)}/mo over the last ${RECENT_MONTHS} months.`
-        : `${c.label} spending has ${rose ? "risen" : "stayed high, moving"} from ${fmt(c.priorAvg)}/mo to ${fmt(c.recentAvg)}/mo over the last ${RECENT_MONTHS} months — a new pressure that wasn't there before.`;
+        ? `${c.label} spending has fallen from ${fmt(c.priorAvg)}/mo to ${fmt(c.recentAvg)}/mo over the last ${window} months.`
+        : `${c.label} spending has ${rose ? "risen" : "stayed high, moving"} from ${fmt(c.priorAvg)}/mo to ${fmt(c.recentAvg)}/mo over the last ${window} months — a new pressure that wasn't there before.`;
 }
 
 export function computeRecentTrends(monthly: MonthlyStatsRow[]): RecentTrendSummary {
-    if (monthly.length < RECENT_MONTHS + 2) return { good: null, bad: null };
+    const window = recentWindowFor(monthly.length);
+    if (window === null) return { good: null, bad: null };
 
-    const recent = monthly.slice(-RECENT_MONTHS);
-    const prior = monthly.slice(0, -RECENT_MONTHS);
+    const recent = monthly.slice(-window);
+    const prior = monthly.slice(0, -window);
 
     const candidates: Candidate[] = [];
 
@@ -134,10 +156,10 @@ export function computeRecentTrends(monthly: MonthlyStatsRow[]): RecentTrendSumm
 
     return {
         good: good
-            ? { label: good.label, kind: good.kind, recentAvg: good.recentAvg, priorAvg: good.priorAvg, sentence: sentenceFor(good, "good") }
+            ? { label: good.label, kind: good.kind, recentAvg: good.recentAvg, priorAvg: good.priorAvg, sentence: sentenceFor(good, "good", window) }
             : null,
         bad: bad
-            ? { label: bad.label, kind: bad.kind, recentAvg: bad.recentAvg, priorAvg: bad.priorAvg, sentence: sentenceFor(bad, "bad") }
+            ? { label: bad.label, kind: bad.kind, recentAvg: bad.recentAvg, priorAvg: bad.priorAvg, sentence: sentenceFor(bad, "bad", window) }
             : null,
     };
 }
