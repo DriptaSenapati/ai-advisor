@@ -5,6 +5,7 @@ import { storage } from "./lib/storage.js";
 import {
     insightsQueue,
     goalQueue,
+    cleanupQueue,
     publish,
     type ExtractJobData,
     type PdfJobData,
@@ -16,6 +17,7 @@ import {
     releaseRetainedFile,
     runExtractionPipeline,
     runProcessPipeline,
+    sweepExpiredRetainedFiles,
 } from "./api/services/statements.service.js";
 import { isPdfPasswordError } from "./modules/pdf/pdf_extractor.js";
 import { runInsightsPipeline } from "./api/services/insights.service.js";
@@ -424,4 +426,60 @@ goalWorker.on("failed", async (job, err) => {
     console.error(`[Worker] goal.analyze failed (attempt ${job?.attemptsMade}):`, err.message);
 });
 
-console.log("[Worker] All workers started — pdf.extract(×2), pdf.process(×2), insights.generate(×1), goal.analyze(×3)");
+// --- Retained-file cleanup: silent 3-day sweep ---
+const cleanupWorker = new Worker(
+    "statements.cleanup",
+    async (job) => {
+        // Logged inside the processor, not at schedule-registration time: a
+        // repeatable job gets a fresh `job.id` on every firing, so a start/finish
+        // pair only correlates correctly if both halves read the same `job.id`
+        // from the same invocation — exactly what the "completed" handler below
+        // also does.
+        await logJobStart({
+            jobType: "statements.cleanup",
+            jobId: job.id ?? "retained-file-sweep",
+            triggerSource: "system-requeue",
+        }).catch((err) => console.error("[AdminJobLog] failed to log job start:", err));
+
+        const result = await sweepExpiredRetainedFiles();
+        console.log(`[Worker] statements.cleanup swept ${result.swept} expired retained file(s)`);
+        return result;
+    },
+    { ...workerOpts, concurrency: 1 }
+);
+
+cleanupWorker.on("completed", async (job) => {
+    await logJobFinish(job.id ?? "retained-file-sweep", "statements.cleanup").catch((err) =>
+        console.error("[AdminJobLog] failed to log job finish:", err)
+    );
+});
+cleanupWorker.on("failed", async (job, err) => {
+    console.error("[Worker] statements.cleanup failed:", err.message);
+    if (job) {
+        await logJobFail(job.id ?? "retained-file-sweep", "statements.cleanup", err.message).catch((e) =>
+            console.error("[AdminJobLog] failed to log job fail:", e)
+        );
+    }
+});
+
+/**
+ * Scheduled once here, not from an HTTP route or script — this is the only
+ * process that runs continuously, and BullMQ dedups repeatable jobs by
+ * `jobId`, so re-registering on every worker restart/deploy is a no-op rather
+ * than a pile of duplicate schedules. Daily rather than every exactly-3-days:
+ * it keeps the actual deletion delay to "3 days ± up to 1 day," which is fine
+ * for housekeeping and simpler to reason about than aligning to a moving
+ * per-row cutoff.
+ */
+async function scheduleRetainedFileSweep(): Promise<void> {
+    await cleanupQueue.add(
+        "sweep-retained-files",
+        {},
+        { repeat: { every: 24 * 60 * 60 * 1000 }, jobId: "retained-file-sweep" }
+    );
+}
+scheduleRetainedFileSweep().catch((err) =>
+    console.error("[Worker] failed to schedule retained-file sweep:", err)
+);
+
+console.log("[Worker] All workers started — pdf.extract(×2), pdf.process(×2), insights.generate(×1), goal.analyze(×3), statements.cleanup(×1, daily)");

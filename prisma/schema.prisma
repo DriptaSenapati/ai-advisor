@@ -393,7 +393,7 @@ model StatementGateDecision {
 /// at enqueue time and updated by the worker's completed/failed handlers.
 model AdminJobLog {
   id                  String    @id @default(auto()) @map("_id") @db.ObjectId
-  jobType             String // "pdf.extract" | "pdf.process" | "insights.generate" | "goal.analyze"
+  jobType             String // "pdf.extract" | "pdf.process" | "insights.generate" | "goal.analyze" | "statements.cleanup"
   jobId               String // BullMQ job.id — correlates back to Bull Board
   userId              String?
   statementMetadataId String?   @db.ObjectId
@@ -460,6 +460,12 @@ model StatementMetadata {
   /// removed) when extraction succeeds or the statement is deleted. Never returned
   /// by the API: see `publicStatement` in statements.service.ts.
   retainedFile           String?
+  /// When `retainedFile` was set. Not `updatedAt` — that field is rewritten by
+  /// any change to this row, not just a password failure, so it can't answer
+  /// "how long has this been held." Cleared alongside `retainedFile` everywhere
+  /// that field is cleared. Drives the 3-day auto-expiry sweep in
+  /// `sweepExpiredRetainedFiles` (statements.service.ts).
+  retainedFileSince      DateTime?
   bankName               String
   accountNumber          String?
   statementPeriodStart   DateTime?

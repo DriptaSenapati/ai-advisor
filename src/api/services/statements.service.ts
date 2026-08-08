@@ -252,7 +252,7 @@ export async function releaseRetainedFile(statementId: string): Promise<void> {
     await storage.delete(row.retainedFile).catch(() => {});
     await prisma.statementMetadata.update({
         where: { id: statementId },
-        data: { retainedFile: null },
+        data: { retainedFile: null, retainedFileSince: null },
     });
 }
 
@@ -291,7 +291,7 @@ export async function unlockStatement(id: string, userId: string, password: stri
         // password" forever.
         if (statement.retainedFile) {
             await prisma.statementMetadata
-                .update({ where: { id }, data: { retainedFile: null } })
+                .update({ where: { id }, data: { retainedFile: null, retainedFileSince: null } })
                 .catch(() => {});
         }
         throw new ConflictError(
@@ -372,6 +372,7 @@ export async function runExtractionPipeline(
                      * have the record claim a file that no longer exists.
                      */
                     retainedFile: isPdfPasswordError(err) ? storageKey : null,
+                    retainedFileSince: isPdfPasswordError(err) ? new Date() : null,
                 },
             });
         } catch { /* ignore secondary failure */ }
@@ -670,12 +671,16 @@ export async function listStatementTransactions(
     return { data, total };
 }
 
-export async function deleteStatement(id: string, userId: string) {
-    const statement = await getStatement(id, userId);
-
-    // Throwing the statement away is an answer at the gate too, so it goes in the
-    // log before the record it refers to stops existing.
-    await recordGateDecision(statement, userId, "discarded");
+/**
+ * The actual row-and-file teardown, shared by a user's own delete and the
+ * 3-day retention sweep below. Both publish the same `"deleted"` SSE frame —
+ * see the frontend note where it's called, below.
+ */
+async function removeStatementRecord(
+    statement: { id: string; bankName: string; rawRowCount: number | null },
+    userId: string
+): Promise<void> {
+    const id = statement.id;
 
     // Red flags point at individual transactions, so they have to go with them or the
     // Insights page keeps offering links into a ledger that no longer has those rows.
@@ -697,8 +702,8 @@ export async function deleteStatement(id: string, userId: string) {
             ? prisma.transactionFlag.deleteMany({ where: { userId, transactionId: { in: doomedTxnIds } } })
             : Promise.resolve(),
         // `userId` is redundant next to `statementMetadataId` — ownership was
-        // already proven by `getStatement` above — but it costs nothing and means
-        // a cascade can never reach across tenants even if that check moves.
+        // already proven by the caller — but it costs nothing and means a
+        // cascade can never reach across tenants even if that check moves.
         prisma.finalTransactionData.deleteMany({ where: { statementMetadataId: id, userId } }),
         prisma.normalizedTransactions.deleteMany({ where: { statementMetadataId: id } }),
         prisma.exceptionTransactions.deleteMany({ where: { statementMetadataId: id } }),
@@ -717,5 +722,53 @@ export async function deleteStatement(id: string, userId: string) {
     // Published *after* the delete, so the snapshot it carries is `null` — which
     // is precisely the signal a client needs to drop the run from its activity
     // list rather than leave it pulsing forever against a record that is gone.
+    // The frontend's handler for `statement: null` (`ProgressProvider.tsx`) is a
+    // silent `forget(statementId)` — no toast, no alert — so this is safe to
+    // publish unconditionally, including from the auto-expiry sweep below: an
+    // amber "awaiting password" dot for a statement that no longer exists is a
+    // worse outcome than a quiet, notification-free removal from the list.
     await publishStatementProgress(userId, id, "deleted");
+}
+
+export async function deleteStatement(id: string, userId: string) {
+    const statement = await getStatement(id, userId);
+
+    // Throwing the statement away is an answer at the gate too, so it goes in the
+    // log before the record it refers to stops existing.
+    await recordGateDecision(statement, userId, "discarded");
+
+    await removeStatementRecord(statement, userId);
+}
+
+/** How long a password-locked upload is held before it is auto-discarded. */
+const RETAINED_FILE_TTL_MS = 3 * 24 * 60 * 60 * 1000;
+
+/**
+ * Auto-discard uploads that have been sitting behind the password gate for
+ * more than 3 days with no retry.
+ *
+ * Runs as a daily repeatable BullMQ job (see `cleanupQueue` in
+ * `queue/index.ts` and its worker in `worker.ts`) rather than on a fixed
+ * schedule tied to when a given file was retained — re-querying by cutoff on
+ * every run means a missed run is simply caught by the next one, with no
+ * per-statement timer to lose track of.
+ *
+ * `removeStatementRecord` still publishes the `"deleted"` SSE frame here, the
+ * same as a user-initiated delete — see the note at that call for why that is
+ * not a user-visible notification. The `AdminJobLog`/console record below is
+ * the separate, ops-facing trail of the sweep having run at all.
+ */
+export async function sweepExpiredRetainedFiles(): Promise<{ swept: number }> {
+    const cutoff = new Date(Date.now() - RETAINED_FILE_TTL_MS);
+    const expired = await prisma.statementMetadata.findMany({
+        where: { retainedFile: { not: null }, retainedFileSince: { lte: cutoff } },
+    });
+
+    for (const statement of expired) {
+        if (!statement.userId) continue; // no owner to attribute the cleanup to — leave it for manual review
+        await recordGateDecision(statement, statement.userId, "discarded", "Auto-expired: password never supplied within 3 days");
+        await removeStatementRecord(statement, statement.userId);
+    }
+
+    return { swept: expired.length };
 }

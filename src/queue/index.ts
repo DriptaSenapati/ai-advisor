@@ -11,6 +11,14 @@ export const extractQueue  = new Queue("pdf.extract",       { connection, defaul
 export const pdfQueue      = new Queue("pdf.process",       { connection, defaultJobOptions: { ...retryDefaults } });
 export const insightsQueue = new Queue("insights.generate", { connection, defaultJobOptions: { ...retryDefaults, backoff: { type: "exponential", delay: 60_000 } } });
 export const goalQueue     = new Queue("goal.analyze",      { connection, defaultJobOptions: { ...retryDefaults, backoff: { type: "exponential", delay: 20_000 } } });
+/**
+ * Not user-triggered like the others — one repeatable job, scheduled once at
+ * worker startup (see `worker.ts`), that sweeps `retainedFile` rows past their
+ * 3-day hold. No `defaultJobOptions` retry backoff worth tuning: a missed run
+ * is caught by the next day's run, since the sweep re-queries by cutoff rather
+ * than acting on a fixed list.
+ */
+export const cleanupQueue  = new Queue("statements.cleanup", { connection });
 
 /**
  * Phase 1 of an upload: read the PDF and stop.

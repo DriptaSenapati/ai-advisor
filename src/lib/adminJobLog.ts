@@ -14,7 +14,7 @@ import prisma from "../prismaClient.js";
  * same discipline `publishStatementProgress`/`publish` already follow.
  */
 
-export type AdminJobType = "pdf.extract" | "pdf.process" | "insights.generate" | "goal.analyze";
+export type AdminJobType = "pdf.extract" | "pdf.process" | "insights.generate" | "goal.analyze" | "statements.cleanup";
 export type AdminJobTriggerSource = "user-upload" | "user-action" | "auto-chain" | "system-requeue";
 
 export async function logJobStart(params: {
