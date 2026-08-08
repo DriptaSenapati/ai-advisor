@@ -44,6 +44,7 @@
     "grant:plan": "cross-env NODE_ENV=development tsx src/scripts/grant-plan.ts",
     "grandfather:verified-users": "cross-env NODE_ENV=development tsx src/scripts/grandfather-verified-users.ts",
     "sweep:retained-files": "cross-env NODE_ENV=development tsx src/scripts/sweep-retained-files.ts",
+    "truncate:account-numbers": "cross-env NODE_ENV=development tsx src/scripts/truncate-account-numbers.ts",
     "check:plans": "cross-env NODE_ENV=development tsx src/scripts/check-plans.ts",
     "check:health": "cross-env NODE_ENV=development tsx src/scripts/check-health.ts",
     "clean:verify": "cross-env NODE_ENV=development tsx src/scripts/clean-verify.ts",

@@ -11,6 +11,7 @@ import fs from "fs";
 import moment from "moment";
 import prisma from "../../prismaClient.js";
 import { storage } from "../../lib/storage.js";
+import { last4 } from "../../lib/accountNumber.js";
 
 const TEMP_ID_KEY = process.env.TEMP_ID_KEY as string;
 
@@ -63,16 +64,18 @@ async function extractBasicDetails(pdfPath: string, metadataId: string, fallback
                 "Extract the bank name, account number, statement start date, and statement end date from this page."
             )],
         });
+        const accountLast4 = last4(details.accountNumber);
         await prisma.statementMetadata.update({
             where: { id: metadataId },
             data: {
                 bankName: details.bankName || fallbackBankName,
-                accountNumber: details.accountNumber || null,
+                // Only the last 4 digits are ever written — see `lib/accountNumber.ts`.
+                accountNumber: accountLast4,
                 statementPeriodStart: parseISODate(details.statementStartDate),
                 statementPeriodEnd: parseISODate(details.statementEndDate),
             },
         });
-        console.log(`[PDF Extractor] Basic details — bank=${details.bankName} account=${details.accountNumber} period=${details.statementStartDate} → ${details.statementEndDate}`);
+        console.log(`[PDF Extractor] Basic details — bank=${details.bankName} account=•••${accountLast4 ?? "n/a"} period=${details.statementStartDate} → ${details.statementEndDate}`);
     } catch (err) {
         console.warn("[PDF Extractor] Basic details extraction failed — skipping:", err);
     }

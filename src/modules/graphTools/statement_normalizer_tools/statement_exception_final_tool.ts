@@ -50,7 +50,14 @@ const statementExceptionFinalTool = tool(async (input) => {
         isNaN(parseFloat(cleanAmount(data.debitAmount || "0")))
     );
     if (nanRows.length > 0) {
-        console.warn("[Exception Handler] NaN rows found:", JSON.stringify(nanRows, null, 2));
+        // Logs only the fields relevant to the parsing failure itself, not the
+        // full row — `description` carries the transaction's narration text,
+        // which is the one field here actually worth not putting in plaintext
+        // logs.
+        console.warn(
+            "[Exception Handler] NaN rows found:",
+            nanRows.map(r => ({ balance: r.balance, creditAmount: r.creditAmount, debitAmount: r.debitAmount }))
+        );
     }
 
     await prisma.normalizedTransactions.createMany({

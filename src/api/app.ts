@@ -145,14 +145,26 @@ createBullBoard({
     ],
     serverAdapter: boardAdapter,
 });
+/**
+ * Fails fast rather than falling back to `admin`/`admin123` — a queue
+ * dashboard exposes every job's payload (including, for `pdf.extract`, a
+ * user's PDF password in plaintext), so an unset env var defaulting to a
+ * well-known credential pair is a real hole, not a convenience worth keeping.
+ * Both `.env.development` and `.env.production` already set both vars, so
+ * this changes nothing for either environment today — it only removes the
+ * silent fallback a future misconfigured environment would otherwise get.
+ */
+if (!process.env.BULL_BOARD_USER || !process.env.BULL_BOARD_PASSWORD) {
+    throw new Error("BULL_BOARD_USER and BULL_BOARD_PASSWORD environment variables are required");
+}
+const BULL_BOARD_USER = process.env.BULL_BOARD_USER;
+const BULL_BOARD_PASSWORD = process.env.BULL_BOARD_PASSWORD;
+
 function bullBoardAuth(req: Request, res: Response, next: NextFunction) {
     const header = req.headers.authorization;
     if (header?.startsWith("Basic ")) {
         const [user, pass] = Buffer.from(header.slice(6), "base64").toString().split(":");
-        if (
-            user === (process.env.BULL_BOARD_USER ?? "admin") &&
-            pass === (process.env.BULL_BOARD_PASSWORD ?? "admin123")
-        ) {
+        if (user === BULL_BOARD_USER && pass === BULL_BOARD_PASSWORD) {
             return next();
         }
     }

@@ -132,6 +132,27 @@ export const auth = betterAuth({
         updateAge: 60 * 60 * 24,             // refresh session if older than 24h
     },
     /**
+     * Made explicit rather than left to the library default
+     * (`enabled: options.rateLimit?.enabled ?? isProduction`, i.e. on in prod,
+     * off in dev) — a security-relevant setting silently depending on
+     * `NODE_ENV` detection is exactly the kind of thing that stays invisible
+     * until an environment doesn't match the assumption.
+     *
+     * `express-rate-limit` (`api/middleware/rateLimiter.ts`) never sees these
+     * routes — `/api/auth/*splat` is mounted before it in `app.ts` and handles
+     * its own body parsing — so this is the only backstop `/sign-in`,
+     * `/sign-up`, and `/request-password-reset` have. better-auth already
+     * ships tighter built-in rules for exactly those paths (3 attempts/10s on
+     * sign-in/sign-up, 3/60s on password-reset/verification-email) on top of
+     * whatever `window`/`max` is set below for everything else; not
+     * duplicated here.
+     */
+    rateLimit: {
+        enabled: process.env.NODE_ENV === "production",
+        window: 10,
+        max: 100,
+    },
+    /**
      * Cross-subdomain session cookie. Enabling the flag alone is not enough:
      * better-auth falls back to `new URL(baseURL).hostname` when `domain` is
      * omitted, which is api.example.com — a host-only cookie the app would
